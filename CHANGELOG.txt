@@ -1,3 +1,20 @@
+2026-10-21 - Driver works: enrolment and verification
+- The transport was corrected once more: every command is a vendor control
+  request pair (0xc3 heartbeat, 0xca reply-length prime), a bulk OUT of the
+  command and a bulk IN of the reply, optionally followed by the 0xda
+  doorbell read.  Cross checked against the USB capture of the same driver
+  family in libfprint MR !586.
+- The chip is an FPC1021 (revision 0x1f) with a 160x160 sensor.  The
+  per-chip configuration table was recovered from the Windows driver's word
+  table walker.
+- The image read has to arm the bulk IN before the bulk OUT is written: the
+  sensor streams the frame while the host is still writing the padded
+  command.
+- The analogue front end had to be retuned for this chip revision; with the
+  driver's settings the sensor saturates at 246/255.
+- Added a libfprint driver (contrib/samsung7301.c) so that the stock fprintd
+  can use the sensor.  fprintd now sees the device, enrolment completes and
+  verification matches.  sudo unlocks with a fingerprint.
 
 2026-10-21 - Major protocol correction
 - Command channel identified as USB control transfers (bmRequestType 0x40/0xC0, bRequest 0xDB/0xDA) via deep RE of fpc_wbdi.dll

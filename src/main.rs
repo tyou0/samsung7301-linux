@@ -33,7 +33,9 @@ fn main() -> Result<()> {
             Ok(())
         }
         "status" => with_handle(&dev, |h| probe_status(h)),
-        "reset" => with_handle(&dev, |h| send_one(h, CMD_RESET, "reset")),
+        "reset" => with_handle(&dev, |h| probe_cmd(h, CMD_SOFT_RESET, "soft_reset")),
+        "hwid" => with_handle(&dev, |h| probe_cmd(h, CMD_HWID, "hwid")),
+        "regcfg" => with_handle(&dev, |h| probe_regcfg(h)),
         "listen" => with_handle(&dev, |h| listen(h)),
         other => {
             eprintln!("unknown mode: {other:?}\n");
@@ -52,14 +54,17 @@ USAGE:
 
 MODES:
     info      (default) print descriptors/endpoints; sends nothing
-    status    send the borrowed 7305 status command and dump the reply
-    reset     send the borrowed 7305 reset command (may disturb the sensor)
+    status    send fngrpresentstatus (0xc8) and dump the reply
+    reset     send soft_reset (0xf8) (may disturb the sensor)
+    hwid      send hwid (0xfc) to read the chip ID
+    regcfg    send the register configuration table from the vendor driver
     listen    passively read the interrupt endpoint for ~3 seconds
 
 NOTES:
     The device node is normally root-only. Run with sudo, or install
     contrib/99-samsung-7301.rules (grants the logged-in seat access).
-    Every command byte is a hypothesis; see src/protocol.rs."
+    Command opcodes come from the vendor driver (docs/REVERSE-ENGINEERING.md);
+    the per-command type byte is still a probe target."
     );
 }
 
@@ -148,26 +153,48 @@ where
 }
 
 fn probe_status(handle: &mut DeviceHandle<Context>) -> Result<()> {
-    println!("\nSending borrowed-7305 status command 0x1c 0x00 ...");
-    let resp = exchange(handle, CMD_STATUS, 64, false)?;
-    println!("  reply ({} bytes): {}", resp.len(), hex(&resp));
-    println!("  interpreted: {}", decode_status(&resp));
+    println!(
+        "\nSending fngrpresentstatus (0x{c8:02x}) ...",
+        c8 = CMD_FNGRPRESENTSTATUS
+    );
+    let pkt = bulk_packet(0, &[CMD_FNGRPRESENTSTATUS]);
+    write_packet(handle, &pkt)?;
+    match read_reply(handle, 64) {
+        Ok(resp) => {
+            println!("  reply ({} bytes): {}", resp.len(), hex(&resp));
+            println!("  interpreted: {}", decode_status(&resp));
+        }
+        Err(e) => println!("  no usable reply: {e:#}"),
+    }
     Ok(())
 }
 
-fn send_one(handle: &mut DeviceHandle<Context>, cmd: &[u8], label: &str) -> Result<()> {
-    println!("\nSending {label} {cmd:02x?} ...");
-    match exchange(handle, cmd, 64, false) {
-        Ok(resp) => {
-            println!("  reply ({} bytes): {}", resp.len(), hex(&resp));
-            Ok(())
-        }
-        Err(e) => {
-            println!("  no usable reply: {e:#}");
-            println!("  This is expected if the 7301 does not share the 7305 transport.");
-            Ok(())
+fn probe_cmd(handle: &mut DeviceHandle<Context>, op: u8, label: &str) -> Result<()> {
+    println!("\nSending {label} (0x{op:02x}) ...");
+    let pkt = bulk_packet(0, &[op]);
+    write_packet(handle, &pkt)?;
+    match read_reply(handle, 64) {
+        Ok(resp) => println!("  reply ({} bytes): {}", resp.len(), hex(&resp)),
+        Err(e) => println!("  no usable reply: {e:#}"),
+    }
+    Ok(())
+}
+
+/// Send the register configuration table recovered from the driver and dump
+/// each reply. This is the most likely step to bring the sensor to life.
+fn probe_regcfg(handle: &mut DeviceHandle<Context>) -> Result<()> {
+    let packets = reg_packets(REG_CONFIG_4EC);
+    println!("\nSending {} register configuration packets ...", packets.len());
+    for (i, pkt) in packets.iter().enumerate() {
+        println!("  [{i}] {:<12} {}", hex(pkt), "");
+        write_packet(handle, pkt)?;
+        match read_reply(handle, 64) {
+            Ok(resp) if !resp.is_empty() => println!("        reply: {}", hex(&resp)),
+            Ok(_) => {}
+            Err(e) => println!("        no reply: {e:#}"),
         }
     }
+    Ok(())
 }
 
 /// Passively listen on the interrupt endpoint. Useful to see whether the

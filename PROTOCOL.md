@@ -1,100 +1,141 @@
 # Protocol notes — Samsung `04e8:7301`
 
-> **These are hypotheses.** Nothing here has been confirmed against a capture of
-> a `04e8:7301` device. The framing is borrowed from the `04e8:7305` driver
-> (libfprint MR !586), which was reverse-engineered from Windows USB captures on
-> a Samsung Notebook 7 Spin.
+> **Status: derived from the vendor driver, not yet confirmed over the wire.**
+> The 7301 was previously thought to share the `04e8:7305` transport; that is
+> now known to be wrong. This file describes the protocol recovered by
+> disassembling the official Samsung Windows driver for this exact laptop
+> (`fpc_wbdi.dll`, version 3.23.0.15). See `docs/REVERSE-ENGINEERING.md` for
+> how the driver was obtained and analysed.
 
-## Device comparison
+## Device identity
 
-| | `04e8:7301` (this sensor) | `04e8:7305` (known driver) |
-|---|---|---|
-| Laptop | Notebook 9 `NT900X5V` | Notebook 7 Spin `NP730QAA` |
-| bcdDevice | `0x0000` | unknown |
-| Class | vendor `ff/02/00` | vendor |
-| Bulk OUT | EP `0x01` | EP `0x01` |
-| Bulk IN | EP `0x02` (**`0x82`**) | EP `0x02` |
-| Interrupt IN | EP `0x03` (**`0x83`**) | ? |
-| MaxPacket | 64 | 64 |
-
-The endpoint *addresses* match exactly once the direction bit is applied
-(`0x82` = IN endpoint 2). This is encouraging but not proof of a shared command
-set: vendors reuse USB interface layouts across sensors with different silicon.
-
-## Transport hypothesis (from samsung7305.c)
-
-Each command is bracketed by control transfers:
+The sensor is an **FPC (Fingerprint Cards AB)** part. Samsung's own INF,
+`fpc_wbdi_um_usb.inf`, binds it:
 
 ```
-host -> device  control  0x40  bRequest 0xc3  wValue 0x0000  wIndex 0x0000
-                          16-byte heartbeat payload (fixed)
-host -> device  control  0x40  bRequest 0xca  wValue 0x0003  wIndex prime_len
-                          (no data)
-host -> device  bulk     EP 0x01  command bytes
-device -> host  bulk     EP 0x82  prime_len bytes response
-device -> host  control  0xc0  bRequest 0xda  wValue 0x0007  2 bytes (optional)
+Provider    = %FPC%                    ; Fingerprint Cards AB
+DriverVer   = 05/17/2018,3.23.0.015
+"FPC Fingerprint Reader" = FpcUsb_Install, USB\VID_04E8&PID_7301
+"FPC Fingerprint Reader" = FpcUsb_Install, USB\VID_04E8&PID_7305
 ```
 
-`0x40` = host→device, vendor, recipient=device.
-`0xc0` = device→host, vendor, recipient=device.
+The same driver covers `04e8:7301` and `04e8:7305`.
 
-The fixed heartbeat is byte-identical across every occurrence in the 7305
-capture, which suggests it is a transport constant rather than device state:
-
-```
-c0 c6 2d 00 08 00 ff 01 01 01 00 00 00 00 00 00
-```
-
-## Commands (unconfirmed for 7301)
-
-| Name | Bytes | Purpose |
-|---|---|---|
-| reset | `f8` | reset sensor |
-| status | `1c 00` | read status register; response byte[1] = state |
-| arm | `20` | arm for finger presence |
-| capture setup | `54 50 18 00 38`, `a0 10 00`, `a8 0f 1a`, `64 0c`, `5c 0a` | configure capture |
-| capture read | `d4 00 00 00 00` | read image strip |
-| trigger | `c0` | trigger capture |
-
-Status response byte[1]:
-
-| Value | Meaning |
+| | `04e8:7301` (this sensor) |
 |---|---|
-| `0x81` | finger present |
-| `0x80` | idle |
-| `0x20` | ready |
+| Laptop | Notebook 9 `NT900X5V-A39A` |
+| bcdDevice | `0x0000` |
+| Class | vendor `ff/02/00` |
+| Bulk OUT | EP `0x01` |
+| Bulk IN | EP `0x82` |
+| Interrupt IN | EP `0x83` |
+| MaxPacket | 64 |
+| Speed | full speed (12 Mbps) |
 
-## Init sequence (7305)
+## Supported FPC sensors
 
-Replayed verbatim from `INIT_SEQ` in `src/protocol.rs`. The **calibration blob**
-(`98 03 ea bf 68 02 09 15 2a 7a de`) is the most suspect entry: on the 7305 it
-was identical across two captures of the *same* unit, and the driver author notes
-it may be per-unit. If the 7301 initialises but produces garbage images, suspect
-this blob first.
+`fpc_wbdi.dll` recognises these parts:
 
-## Frame assembly (7305, for reference)
+```
+FPC1020 FPC1021 FPC1022 FPC1025 FPC1035 FPC1140 FPC1145 FPC1150 FPC1155 FPC1260 FPC1265
+```
 
-The sensor streams strips rather than whole frames:
+## Command set
 
-1. Capture setup, trigger, wait.
-2. Read strip 1, then a "between strips" command `a8 0f 0a`.
-3. Trigger/read strip 2, then strip 3.
-4. A flat-field (`ff`) setup and a full frame read.
-5. Strips are assembled into a `FpImage` via `fpi_frame_asmbl_ctx`.
+`fpc_wbdi.dll+0x18000fb5c` is a byte→name dispatcher over the command opcode.
+The full table:
 
-Geometry constants from the 7305 capture: `54 50 18 00 38` and `54 00 c0 00 38`
-suggest a 0x50×0x18 region and a 0xc0×0x38 frame. These are almost certainly
-sensor-specific and must be re-derived for the 7301.
+| Opcode | Name | Opcode | Name |
+|--------|------|--------|------|
+| `0x10` | navdata | `0x90` | fngrdrivedly |
+| `0x1c` | read_interrupt_with_clear | `0x94` | osctrim |
+| `0x20` | finger_present_query | `0x98` | adcweighttbl |
+| `0x24` | wait_for_finger_present | `0x9c` | adcsetup |
+| `0x28` | activate_sleep_mode | `0xa0` | adcshiftgain |
+| `0x2c` | activate_deep_sleep_mode | `0xa8` | pxlctrl |
+| `0x30` | activatenav | `0xac` | afdctrl |
+| `0x34` | activate_idle_mode | `0xb4` | capture_image |
+| `0x3c` | clkbist | `0xb8` | read_image_data |
+| `0x4c` | imgsmplsetup | `0xc8` | fngrpresentstatus |
+| `0x54` | imgcapsize | `0xd8` | fngrdetthresh |
+| `0x5c` | imagesetup | `0xdc` | fngrdetcntr |
+| `0x64` | imagerd | `0xe0` | fngrdownshrt |
+| `0x68` | sampledly | `0xe4` | fngrdownlong |
+| `0x6c` | pxlrstdly | `0xe8` | fngrdownhold |
+| `0x78` | tstcolpatternen | `0xec` | fngrareactrl |
+| `0x7c` | clkbistresult | `0xf0` | afdcalibration |
+| `0x80` | offsetdac | `0xf4` | afdstatus |
+| `0x8c` | fngrdriveconf | `0xf8` | soft_reset |
+| | | `0xfc` | hwid |
 
-## What would confirm or refute this
+## Wire framing
 
-A USBPcap trace of the Windows driver on a `04e8:7301` machine, covering:
+Commands are sent as **bulk** transfers (not vendor control requests — the
+earlier `0xc3`/`0xca` control-transfer hypothesis was wrong). Each packet is a
+4-byte header followed by a payload:
 
-1. driver load / device init,
-2. one full enrollment,
-3. one successful verification,
-4. one failed verification.
+```
+register/value form:  40 c3 00 00 <payload...>
+bulk data form:       40 ca <len_lo> <len_hi> <type_byte> <payload...>
+```
 
-With that trace, the work is mechanical: diff the observed control/bulk
-sequences against this file, replace the constants, and replay them in Rust.
-Without it, `samsung7301 status` is the best available test.
+- `40 c3` — command/register header.
+- `40 ca` — bulk data header with a little-endian 16-bit payload length and a
+  type byte before the payload.
+
+The small-packet sender (`fpc_wbdi.dll+0x180008738`) builds
+`40 ca 03 00 <type> <lo> <hi>` and issues a 3-byte transfer.
+
+### Chunking
+
+Large transfers use a 25602-byte buffer (25600 payload + 2). A type byte is
+written first, then the payload, and the size sent is `payload_len + 1`.
+Transfers larger than 25600 bytes are split into chunks.
+
+### Timeouts
+
+The read/write wrappers pass a timeout structure of 3 000 000 µs (3 s):
+
+```
+dword 0x002dc6c0   ; 3_000_000 us
+dword 0x01ff0008
+qword 0x0000000000000101
+```
+
+## Register configuration
+
+`fpc_wbdi.dll+0x1800071d8` builds a register table for chip ID `0x4ec`
+(FPC1022). It is a stream of 16-bit little-endian words terminated by `0x0100`.
+The driver's parser (`0x180007dd8`) accumulates bytes and flushes a `40 c3`
+packet whenever it sees `0x0100`:
+
+```
+004c 0004 00ff 00ff 0011 0100
+006c 0004 0100 0068 0013 0008 0008 0008 0008 0014 0014 0014 0014 0100
+0080 0082 0015 0015 0015 0015 0009 0009 0009 0009 0100
+0098 0003 00eb 003f 00b8 000a 0007 0011 0022 006a 005d 0100
+008c 0000 0004
+```
+
+## Operation sequence (inferred)
+
+```
+soft_reset (0xf8)
+hwid (0xfc)
+register configuration table
+imagesetup (0x5c)
+capture_image (0xb4)
+read_image_data (0xb8)
+```
+
+Finger detection polls `read_interrupt_with_clear (0x1c)` or
+`fngrpresentstatus (0xc8)`.
+
+## Still unknown
+
+- The exact **type byte** values in the `40 ca` header, per command.
+- Whether the reply carries a length/checksum trailer.
+- The precise `imagesetup` argument block for this sensor variant.
+
+A live `usbmon` capture of the Windows driver (or the working Linux driver
+once written) will resolve these. See `docs/CAPTURE.md`.

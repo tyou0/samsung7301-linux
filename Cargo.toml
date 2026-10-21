@@ -1,0 +1,25 @@
+[package]
+name = "samsung7301"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Userspace Linux driver research tool for the Samsung 04e8:7301 fingerprint sensor"
+license = "MIT"
+repository = "https://github.com/CHANGEME/samsung7301-linux"
+keywords = ["fingerprint", "libusb", "samsung", "fprintd"]
+categories = ["hardware-support"]
+
+[[bin]]
+name = "samsung7301"
+path = "src/main.rs"
+
+[lints.rust]
+dead_code = "allow"
+
+[dependencies]
+anyhow = "1"
+rusb = "0.9"
+
+[profile.release]
+lto = true
+strip = true

@@ -1,0 +1,3 @@
+# Allow the logged-in seat user to open the sensor (libusb needs the raw node).
+# Without this, every mode except `info` requires sudo.
+SUBSYSTEM=="usb", ATTR{idVendor}=="04e8", ATTR{idProduct}=="7301", TAG+="uaccess"

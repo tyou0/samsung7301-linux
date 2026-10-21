@@ -9,6 +9,10 @@ repository = "https://github.com/CHANGEME/samsung7301-linux"
 keywords = ["fingerprint", "libusb", "samsung", "fprintd"]
 categories = ["hardware-support"]
 
+[lib]
+name = "samsung7301"
+path = "src/lib.rs"
+
 [[bin]]
 name = "samsung7301"
 path = "src/main.rs"
@@ -19,6 +23,8 @@ dead_code = "allow"
 [dependencies]
 anyhow = "1"
 rusb = "0.9"
+libusb1-sys = "0.7"
+libc = "0.2"
 
 [profile.release]
 lto = true

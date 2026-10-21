@@ -63,6 +63,8 @@ name = "samsung7301"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "libc",
+ "libusb1-sys",
  "rusb",
 ]
 

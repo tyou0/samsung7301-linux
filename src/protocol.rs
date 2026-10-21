@@ -2,31 +2,20 @@
 //!
 //! # Provenance
 //!
-//! Everything here was recovered by disassembling the official Samsung Windows
-//! driver for this exact laptop: `fpc_wbdi.dll`, version 3.23.0.15
-//! (Fingerprint Cards AB). See `docs/REVERSE-ENGINEERING.md` for how the driver
-//! was obtained and how each constant was derived.
+//! The sensor is an FPC (Fingerprint Cards AB) part that Samsung rebadges
+//! under vendor ID `04e8`. The official Windows driver for this exact laptop
+//! (`fpc_wbdi.dll`, v3.23.0.15) was disassembled to recover the command
+//! vocabulary below; see `docs/REVERSE-ENGINEERING.md`.
 //!
-//! The sensor is an FPC part. Samsung ships it under vendor ID `04e8`, and the
-//! driver's INF binds `USB\VID_04E8&PID_7301` and `PID_7305` to the same
-//! "FPC Fingerprint Reader" stack.
-//!
-//! An earlier revision borrowed a *control-transfer* protocol from another FPC
-//! part. That was wrong. The real driver uses **bulk** transfers exclusively,
-//! with two packet forms ([`reg_packet`] and [`bulk_packet`]), and every
-//! command is issued as a register write followed by a bulk write.
-//!
-//! # Bring-up
-//!
-//! The device does not answer commands until it has been taken out of its
-//! default state. The driver's first transfer is a **single mode byte**
-//! (`0x20`, `0x34` or `0x98`); it then waits for `0xc0` in the reply. See
-//! [`bootstrap`].
+//! The transport (see [`crate::transport`]) is the "wbdi" framing shared by
+//! the whole Samsung FPC reader family.
+
+// The opcode table below is self-documenting: every constant is listed with
+// its name in the driver's dispatcher, and the table is reproduced in
+// `docs/REVERSE-ENGINEERING.md`.
+#![allow(missing_docs)]
 
 use std::time::Duration;
-
-use anyhow::{Context, Result};
-use rusb::DeviceHandle;
 
 /// Samsung USB vendor ID.
 pub const VID: u16 = 0x04e8;
@@ -34,94 +23,11 @@ pub const VID: u16 = 0x04e8;
 pub const PID_7301: u16 = 0x7301;
 /// Sibling sensor sharing the same driver (for reference/experiments).
 pub const PID_7305: u16 = 0x7305;
-
-/// Bulk OUT endpoint (host -> device).
-pub const EP_OUT: u8 = 0x01;
-/// Bulk IN endpoint (device -> host).
-pub const EP_IN: u8 = 0x82;
-/// Interrupt IN endpoint (status / doorbell).
-pub const EP_INTR: u8 = 0x83;
-
-pub const CMD_TIMEOUT: Duration = Duration::from_millis(3_000);
-pub const IMG_TIMEOUT: Duration = Duration::from_millis(3_000);
-
-/// Largest payload the driver moves in a single bulk transfer (`0x6400`).
-pub const MAX_XFER: usize = 0x6400;
-/// Staging-buffer size the driver allocates (`0x6402`, i.e. [`MAX_XFER`] + 2).
-pub const STAGE_LEN: usize = 0x6402;
-
-/// Magic value the device returns when a mode byte is accepted.
-/// Magic value the device returns when a mode byte is accepted (observed in
-/// the mode-ack path; kept for reference).
-pub const MODE_ACK: u8 = 0xc0;
+/// Sibling area sensor with the same transport (reference driver).
+pub const PID_730B: u16 = 0x730b;
 
 /// Chip ID of the FPC1022, the part this laptop carries.
 pub const CHIP_ID_FPC1022: u32 = 0x4ec;
-
-// ---------------------------------------------------------------------------
-// Framing
-// ---------------------------------------------------------------------------
-//
-// Two transports are in play, recovered from distinct helpers in
-// `fpc_wbdi.dll`:
-//
-//   * the COMMAND channel is USB *control* transfers — vendor requests
-//     `bRequest = 0xda` (read) and `0xdb` (write). See [`ctrl_write`] /
-//     [`ctrl_read`].
-//   * the DATA channel is *bulk* transfers on the OUT/IN pipes, carrying the
-//     `40 c3` / `40 ca` frames built by `hw_usb_write` (`+0x18000ad1c`).
-//
-// The earlier revision treated the bulk frames as the command channel; that was
-// wrong. See `docs/REVERSE-ENGINEERING.md` §6.
-
-/// Control-request code for a **read** (device -> host) on the command channel.
-/// Recovered from `fpc_wbdi.dll+0x180008e3c`.
-pub const CREQ_READ: u8 = 0xda;
-/// Control-request code for a **write** (host -> device) on the command channel.
-/// Recovered from `fpc_wbdi.dll+0x180008eac`.
-pub const CREQ_WRITE: u8 = 0xdb;
-/// `bmRequestType` for a vendor, host-to-device request.
-pub const BM_WRITE: u8 = 0x40;
-/// `bmRequestType` for a vendor, device-to-host request.
-pub const BM_READ: u8 = 0xc0;
-
-/// Register/command header (`40 c3 00 00`, little-endian `0x0000c340`).
-pub const HEADER_REG: [u8; 4] = [0x40, 0xc3, 0x00, 0x00];
-
-/// Bulk data header prefix (`40 ca`).
-pub const HEADER_BULK: [u8; 2] = [0x40, 0xca];
-
-/// Type byte the driver puts after the bulk header. Recovered from the header
-/// dword `0x0003ca40` in `hw_usb_bulk_write`; it is `0x03`, not command
-/// specific.
-pub const BULK_TYPE: u8 = 0x03;
-
-/// Build a `40 ca` bulk packet: header, little-endian length, type byte,
-/// payload.
-pub fn bulk_packet(payload: &[u8]) -> Vec<u8> {
-    let len = payload.len() as u16;
-    let mut pkt = Vec::with_capacity(4 + 1 + payload.len());
-    pkt.extend_from_slice(&HEADER_BULK);
-    pkt.extend_from_slice(&len.to_le_bytes());
-    pkt.push(BULK_TYPE);
-    pkt.extend_from_slice(payload);
-    pkt
-}
-
-/// Build a `40 c3` register packet.
-pub fn reg_packet(payload: &[u8]) -> Vec<u8> {
-    let mut pkt = Vec::with_capacity(4 + payload.len());
-    pkt.extend_from_slice(&HEADER_REG);
-    pkt.extend_from_slice(payload);
-    pkt
-}
-
-/// The constant register frame the driver prefixes every bulk command with.
-///
-/// In `fpc_wbdi.dll+0x180008494` the header dword is `0x0000c340` and the
-/// following word is written from `r15w`, which is zeroed on entry. So the
-/// register packet is always exactly this, independent of the command.
-pub const REG_FRAME: [u8; 6] = [0x40, 0xc3, 0x00, 0x00, 0x00, 0x00];
 
 // ---------------------------------------------------------------------------
 // Command opcodes
@@ -215,118 +121,15 @@ pub fn op_name(op: u8) -> &'static str {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Bring-up
-// ---------------------------------------------------------------------------
-//
-// Recovered from `fpc_wbdi.dll+0x180008eac` (control write), `+0x180008e3c`
-// (control read), `+0x180007c84` (chip config) and `+0x1800073e8` (status
-// poll).
-
-/// Control-request `wValue`s the driver writes during chip bring-up, from the
-/// call sites listed in `docs/REVERSE-ENGINEERING.md` §6.3.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct InitCmd {
-    pub w_value: u16,
-    pub w_index: u16,
-}
-
-/// Chip-init write used for chip ID `0x474`.
-pub const INIT_474: InitCmd = InitCmd {
-    w_value: 0x000b,
-    w_index: 0,
-};
-/// Second chip-init write used for chip ID `0x474`.
-pub const INIT_474_IDX1: InitCmd = InitCmd {
-    w_value: 0x000b,
-    w_index: 1,
-};
-/// Re-init writes observed without a chip gate.
-pub const REINIT_0: InitCmd = InitCmd {
-    w_value: 0x0006,
-    w_index: 0,
-};
-pub const REINIT_1: InitCmd = InitCmd {
-    w_value: 0x0006,
-    w_index: 1,
-};
-
-/// Init command for FPC1022 (0x4ec) on this platform, inferred from live probe.
-pub const INIT_FPC1022_0: InitCmd = InitCmd {
-    w_value: 0x0006,
-    w_index: 0,
-};
-pub const INIT_FPC1022_1: InitCmd = InitCmd {
-    w_value: 0x0006,
-    w_index: 1,
-};
-
-/// Control-request `wValue` the driver reads the status register with.
-pub const STATUS_REG_WVALUE: u16 = 0x00d4;
-
-/// Size of the status register read (`c0 da d4 00 00 00 04 00`).
-pub const STATUS_READ_LEN: u16 = 4;
-/// Size of the mode-acknowledgement read (`c0 da <val> 00 00 02 00`).
-pub const ACK_READ_LEN: u16 = 2;
-
-/// Threshold the driver uses for "device ready": it polls until the decoded
-/// state code is strictly below this.
-pub const STATE_READY_MAX: u8 = 6;
-
-/// Number of attempts the driver makes per status poll.
-pub const STATUS_POLL_ATTEMPTS: u32 = 10;
-/// Delay between status-poll attempts, in milliseconds.
-pub const STATUS_POLL_DELAY_MS: u64 = 10;
-
-/// Build the chip-configuration command for a given chip ID.
-///
-/// For the FPC1022 (`0x4ec`) this is `a8 93|00 0f <arg>`; other chips get the
-/// shorter `a8 0f <arg>` form. This is a *bulk* payload, not a control request.
-pub fn chip_config(chip_id: u32, sub: u8) -> Vec<u8> {
-    // The driver's flag byte is 0x93 when (something) is non-negative, else
-    // 0x00. The exact predicate is not fully traced, so default to 0x93.
-    const FLAG: u8 = 0x93;
-    if chip_id == CHIP_ID_FPC1022 {
-        vec![CMD_PXLCTRL, FLAG, 0x0f, sub]
-    } else {
-        vec![CMD_PXLCTRL, 0x0f, sub]
-    }
-}
-
-/// Decode the 16-bit status word from a status-register reply.
-///
-/// The driver reads the two low bytes and combines them as `hi*0x100 + lo`
-/// (i.e. little-endian 16-bit), then inspects individual bits.
-pub fn decode_status_word(resp: &[u8]) -> Option<u16> {
-    if resp.len() < 2 {
-        return None;
-    }
-    Some(u16::from_le_bytes([resp[0], resp[1]]))
-}
-
-/// Individual bits of the status word, as the driver interprets them.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct StatusBits {
-    pub raw: u16,
-}
-
-impl StatusBits {
-    pub fn from_word(w: u16) -> Self {
-        StatusBits { raw: w }
-    }
-    pub fn bit(&self, i: u8) -> bool {
-        (self.raw >> i) & 1 != 0
-    }
-}
-
-impl std::fmt::Display for StatusBits {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "0x{:04x} [", self.raw)?;
-        for i in (0..12).rev() {
-            write!(f, "{}", if self.bit(i) { '1' } else { '0' })?;
-        }
-        write!(f, "]")
-    }
+/// Opcodes that require the extra `0xda` doorbell read after the exchange.
+pub fn needs_doorbell(op: u8) -> bool {
+    matches!(
+        op,
+        CMD_FINGER_PRESENT_QUERY
+            | CMD_ACTIVATE_SLEEP_MODE
+            | CMD_SOFT_RESET
+            | CMD_CAPTURE_IMAGE
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -334,135 +137,263 @@ impl std::fmt::Display for StatusBits {
 // ---------------------------------------------------------------------------
 
 /// Register configuration words for chip ID `0x4ec` (FPC1022), from
-/// `fpc_wbdi.dll+0x1800071d8`. Little-endian 16-bit words; `0x0100` terminates
-/// a `40 c3` packet.
+/// `fpc_wbdi.dll+0x1800071d8`. Little-endian 16-bit words; `0x0100`
+/// terminates a frame.
+///
+/// The pairs are `register`, `value`; the driver's walker turns each pair
+/// into a register write.
 pub const REG_CONFIG_4EC: &[u16] = &[
     0x004c, 0x0004, 0x00ff, 0x00ff, 0x0011, 0x0100,
-    0x006c, 0x0004, 0x0100, 0x0068, 0x0013, 0x0008, 0x0008, 0x0008, 0x0008,
-    0x0014, 0x0014, 0x0014, 0x0014, 0x0100,
-    0x0080, 0x0082, 0x0015, 0x0015, 0x0015, 0x0015, 0x0009, 0x0009, 0x0009,
-    0x0009, 0x0100,
-    0x0098, 0x0003, 0x00eb, 0x003f, 0x00b8, 0x000a, 0x0007, 0x0011, 0x0022,
-    0x006a, 0x005d, 0x0100,
+    0x006c, 0x0004, 0x0100, 0x0068, 0x0013, 0x0008, 0x0008, 0x0008, 0x0008, 0x0014, 0x0014, 0x0014,
+    0x0014, 0x0100,
+    0x0080, 0x0082, 0x0015, 0x0015, 0x0015, 0x0015, 0x0009, 0x0009, 0x0009, 0x0009, 0x0100,
+    0x0098, 0x0003, 0x00eb, 0x003f, 0x00b8, 0x000a, 0x0007, 0x0011, 0x0022, 0x006a, 0x005d, 0x0100,
     0x008c, 0x0000, 0x0004,
 ];
 
-/// Split [`REG_CONFIG_4EC`] into `40 c3` register packets, flushing at each
-/// `0x0100` terminator.
-pub fn reg_packets(words: &[u16]) -> Vec<Vec<u8>> {
-    let mut packets = Vec::new();
+/// Split [`REG_CONFIG_4EC`] into the driver's `40 c3` register frames, flushing
+/// at each `0x0100` terminator.
+pub fn reg_frames(words: &[u16]) -> Vec<Vec<u8>> {
+    let mut frames = Vec::new();
     let mut current = Vec::new();
     for &w in words {
         if w == 0x0100 {
             if !current.is_empty() {
-                packets.push(reg_packet(&current));
-                current.clear();
+                frames.push(std::mem::take(&mut current));
             }
         } else {
             current.extend_from_slice(&w.to_le_bytes());
         }
     }
     if !current.is_empty() {
-        packets.push(reg_packet(&current));
+        frames.push(current);
     }
-    packets
+    frames
 }
 
 // ---------------------------------------------------------------------------
-// Transport
+// Init / capture sequences
 // ---------------------------------------------------------------------------
 
-/// Write one framed packet to the bulk OUT endpoint.
-pub fn write_packet(handle: &DeviceHandle<rusb::Context>, packet: &[u8]) -> Result<usize> {
-    handle
-        .write_bulk(EP_OUT, packet, CMD_TIMEOUT)
-        .with_context(|| format!("bulk OUT {} bytes", packet.len()))
+/// A command with the reply length the device is expected to stage.
+#[derive(Clone, Copy, Debug)]
+pub struct Cmd {
+    pub bytes: &'static [u8],
+    pub reply_len: u16,
+    pub doorbell: bool,
 }
 
-/// Read a reply from the bulk IN endpoint.
-pub fn read_reply(handle: &DeviceHandle<rusb::Context>, max: usize) -> Result<Vec<u8>> {
-    let mut buf = vec![0u8; max.min(STAGE_LEN)];
-    let n = handle
-        .read_bulk(EP_IN, &mut buf, IMG_TIMEOUT)
-        .context("bulk IN reply")?;
-    buf.truncate(n);
-    Ok(buf)
-}
-
-/// Issue a command on the **control** channel — the driver's real command path.
-///
-/// `bmRequestType = 0x40` (vendor, host-to-device), `bRequest = 0xdb`,
-/// `wValue`/`wIndex` as given, `wLength = 0`. Recovered from
-/// `fpc_wbdi.dll+0x180008eac`.
-pub fn ctrl_write(
-    handle: &DeviceHandle<rusb::Context>,
-    w_value: u16,
-    w_index: u16,
-) -> Result<()> {
-    handle
-        .write_control(BM_WRITE, CREQ_WRITE, w_value, w_index, &[], CMD_TIMEOUT)
-        .with_context(|| format!("control write wValue=0x{w_value:04x} wIndex=0x{w_index:04x}"))?;
-    Ok(())
-}
-
-/// Read a reply from the **control** channel.
-///
-/// `bmRequestType = 0xc0` (vendor, device-to-host), `bRequest = 0xda`,
-/// `wIndex = 0`. Recovered from `fpc_wbdi.dll+0x180008e3c`.
-pub fn ctrl_read(
-    handle: &DeviceHandle<rusb::Context>,
-    w_value: u16,
-    len: u16,
-) -> Result<Vec<u8>> {
-    let mut buf = vec![0u8; len as usize];
-    let n = handle
-        .read_control(BM_READ, CREQ_READ, w_value, 0, &mut buf, CMD_TIMEOUT)
-        .with_context(|| format!("control read wValue=0x{w_value:04x} len={len}"))?;
-    buf.truncate(n);
-    Ok(buf)
-}
-
-/// Send a bulk payload the way the driver does: constant register frame, then
-/// the `40 ca` bulk write carrying the payload. Used for image/streaming data.
-pub fn write_bulk_command(handle: &DeviceHandle<rusb::Context>, payload: &[u8]) -> Result<()> {
-    write_packet(handle, &REG_FRAME)?;
-    write_packet(handle, &bulk_packet(payload))?;
-    Ok(())
-}
-
-/// Perform the driver's chip bring-up on the control channel.
-///
-/// Writes [`INIT_474`] (and optionally [`INIT_474_IDX1`]), then reads the
-/// acknowledgement. Returns the raw acknowledgement bytes.
-pub fn chip_init(handle: &DeviceHandle<rusb::Context>, cmd: InitCmd) -> Result<Vec<u8>> {
-    ctrl_write(handle, cmd.w_value, cmd.w_index)?;
-    ctrl_read(handle, cmd.w_value, ACK_READ_LEN)
-}
-
-/// Read the status register (`c0 da d4 00 00 00 04 00`).
-pub fn read_status(handle: &DeviceHandle<rusb::Context>) -> Result<Vec<u8>> {
-    ctrl_read(handle, STATUS_REG_WVALUE, STATUS_READ_LEN)
-}
-
-/// Decode the finger-present state from a status reply.
-///
-/// The driver decodes `fngrpresentstatus` as a 16-bit word; this reports the
-/// raw bits and a best-effort interpretation.
-pub fn decode_status(resp: &[u8]) -> String {
-    match decode_status_word(resp) {
-        Some(w) => {
-            let bits = StatusBits::from_word(w);
-            let finger = bits.bit(0);
-            format!(
-                "{} (finger={})",
-                bits,
-                if finger { "present" } else { "absent" }
-            )
+impl Cmd {
+    pub const fn new(bytes: &'static [u8], reply_len: u16) -> Self {
+        Self {
+            bytes,
+            reply_len,
+            doorbell: false,
         }
-        None => match resp.first() {
-            Some(&0x00) => "ok / no finger".to_string(),
-            Some(&b) => format!("state 0x{b:02x}"),
-            None => "empty reply".to_string(),
-        },
+    }
+
+    pub const fn with_doorbell(bytes: &'static [u8], reply_len: u16) -> Self {
+        Self {
+            bytes,
+            reply_len,
+            doorbell: true,
+        }
+    }
+}
+
+/// Soft reset.
+pub const SEQ_RESET: Cmd = Cmd::with_doorbell(&[0xf8], 1);
+/// Read interrupt status with clear (finger present bit lives here).
+pub const SEQ_STATUS: Cmd = Cmd::new(&[0x1c, 0x00], 2);
+/// Hardware ID / chip identification.
+pub const SEQ_HWID: Cmd = Cmd::new(&[0xfc, 0x00, 0x00], 3);
+/// Image capture geometry.
+pub const SEQ_CAPGEO: Cmd = Cmd::new(&[0x54, 0x50, 0x18, 0x00, 0x38], 5);
+/// Capacitive read (finger presence "saturation" check).
+pub const SEQ_CAP: Cmd = Cmd::new(&[0xd4, 0x00, 0x00, 0x00, 0x00], 5);
+/// Arm the sensor for a capture.
+pub const SEQ_ARM: Cmd = Cmd::with_doorbell(&[0x20], 1);
+/// Trigger a capture.
+pub const SEQ_TRIGGER: Cmd = Cmd::with_doorbell(&[0xc0], 1);
+/// Activate sleep mode (marks the end of the init sequence).
+pub const SEQ_INITDONE: Cmd = Cmd::with_doorbell(&[0x28], 1);
+
+/// The bring-up sequence, byte for byte as the Samsung Windows driver issues
+/// it (recovered from a USB capture of a `04e8:7305`, whose Windows driver is
+/// the same `fpc_wbdi` stack this machine uses).
+///
+/// The `wIndex` of the `0xca` prime — the expected reply length — equals the
+/// length of the command itself.
+pub const INIT_SEQUENCE: &[Cmd] = &[
+    SEQ_RESET,
+    SEQ_STATUS,
+    SEQ_STATUS,
+    SEQ_HWID,
+    Cmd::new(&[0x90, 0x34], 2),
+    Cmd::new(
+        &[0x68, 0x33, 0x33, 0x33, 0x33, 0x3f, 0x3f, 0x3f, 0x3f],
+        9,
+    ),
+    Cmd::new(&[0x9c, 0x55, 0x40, 0x00, 0x2d, 0x24], 6),
+    Cmd::new(&[0x6c, 0x2b], 2),
+    Cmd::new(&[0x8c, 0x12], 2),
+    Cmd::new(&[0x5c, 0x0b], 2),
+    Cmd::new(
+        &[0x98, 0x03, 0xea, 0xbf, 0x68, 0x02, 0x09, 0x15, 0x2a, 0x7a, 0xde],
+        11,
+    ),
+    Cmd::new(&[0xd8, 0x00, 0x01, 0x20, 0x20], 5),
+    Cmd::new(&[0xe0, 0x32, 0x70, 0x22], 4),
+    Cmd::new(&[0xe4, 0x32, 0x88, 0x70], 4),
+    Cmd::new(&[0xe8, 0x32, 0x88], 3),
+    Cmd::new(&[0xdc, 0x19, 0x01, 0x00, 0x0a], 5),
+    Cmd::new(&[0xa8, 0x0f, 0x0a], 3),
+    Cmd::new(&[0xa0, 0x0a, 0x02], 3),
+    SEQ_INITDONE,
+];
+
+/// Bring-up sequence for the FPC1021 (`0x3fd`) part — the 160x160 sensor this
+/// laptop carries.
+///
+/// The frames are the per-chip configuration table the Windows driver builds
+/// in `fpc_wbdi.dll+0x180005fa8`; the walker at `+0x180007dd8` turns the
+/// 16-bit word table into "register, value, value, ..." frames, terminated by
+/// the word `0x0100`.
+pub const INIT_SEQUENCE_1021: &[Cmd] = &[
+    SEQ_RESET,
+    SEQ_STATUS,
+    SEQ_STATUS,
+    SEQ_HWID,
+    // adcsetup
+    Cmd::new(&[0x9c, 0x55, 0x40, 0x00, 0x2d, 0x24], 6),
+    // pxlrstdly
+    Cmd::new(&[0x6c, 0x29, 0x00, 0x90, 0x20], 5),
+    // sampledly
+    Cmd::new(&[0x68, 0x31, 0x31, 0x3d, 0x3d], 5),
+    // adcweighttbl (calibration)
+    Cmd::new(
+        &[0x98, 0x03, 0xeb, 0x3f, 0xb8, 0x0a, 0x70, 0x11, 0x22, 0x6a, 0x5d],
+        11,
+    ),
+    // fngrdriveconf
+    Cmd::new(&[0x8c, 0x12, 0x00, 0x5c, 0xb0], 5),
+    // fngrdetthresh
+    Cmd::new(&[0xd8, 0x20, 0x00], 3),
+    // fngrdetcntr
+    Cmd::new(&[0xdc, 0x00, 0x0a], 3),
+    // imagesetup
+    Cmd::new(&[0x5c, 0x0b], 2),
+    // pxlctrl
+    Cmd::new(&[0xa8, 0x0f, 0x0a], 3),
+    // adcshiftgain
+    Cmd::new(&[0xa0, 0x0a, 0x02], 3),
+    SEQ_INITDONE,
+];
+
+/// Capture setup for a strip ("finger present" preview) read.
+pub const CAPTURE_SETUP: &[Cmd] = &[
+    SEQ_CAP,
+    SEQ_CAPGEO,
+    Cmd::new(&[0xa0, 0x10, 0x00], 3),
+    Cmd::new(&[0xa8, 0x0f, 0x1a], 3),
+    Cmd::new(&[0x64, 0x0c], 2),
+    Cmd::new(&[0x5c, 0x0a], 2),
+];
+
+/// Capture setup for a full frame read — the sequence the Windows driver
+/// uses before the final image of an enrollment.
+pub const CAPTURE_SETUP_FRAME: &[Cmd] = &[
+    SEQ_CAP,
+    Cmd::new(&[0xa0, 0x0e, 0x06], 3),
+    Cmd::new(&[0x64, 0x1e], 2),
+    Cmd::new(&[0x5c, 0x0b], 2),
+];
+
+/// The capture setup to use (`strip` or `frame`).
+pub fn capture_setup() -> &'static [Cmd] {
+    match std::env::var("SAMSUNG7301_SETUP").as_deref() {
+        Ok("frame") => CAPTURE_SETUP_FRAME,
+        _ => CAPTURE_SETUP,
+    }
+}
+
+/// Image read opcode. The command is padded to the length of the image
+/// transfer, exactly as the Windows driver does.
+pub const CMD_IMAGE_READ: u8 = 0xc4;
+
+/// Capture geometry, as reported by the sensor's `imgcapsize` command.
+///
+/// The FPC1022 in this laptop reports a 160 x 160 frame, which matches the
+/// `0x6402` byte staging buffer the Windows driver allocates (25600 pixels
+/// plus a two byte header).
+pub const IMG_WIDTH: usize = 160;
+pub const IMG_HEIGHT: usize = 160;
+
+/// Length of the image transfer, in bytes (image payload plus a two byte
+/// header).
+pub const IMAGE_LEN: usize = IMG_WIDTH * IMG_HEIGHT + 2;
+
+/// Command that sets the capture geometry to the full frame.
+///
+/// The layout is `54 <mode> 0x18 <height> <width>`: the third byte is a
+/// constant in the Windows driver, the fourth is the height and the fifth
+/// the width.
+pub const SEQ_FRAME_GEO: Cmd = Cmd::new(&[0x54, 0x00, 0xa0, 0x00, 0xa0], 5);
+
+/// Capture parameters tuned on real hardware.
+///
+/// The Windows driver ships a configuration for the FPC1021 revision `0x10`;
+/// this machine carries revision `0x1f`, whose ADC settings differ. These
+/// values were found by sweeping the registers that control the analogue
+/// front end and picking the setting with the largest image contrast:
+///
+/// * `a0 00 00` — `adcshiftgain`, gain 0. The driver's default gain of
+///   `0x10` saturates the sensor at 246/255, so only a handful of pixels
+///   carry any information at all.
+/// * `9c 55 40 00 08 24` — `adcsetup`. The fourth argument is the one that
+///   matters: the driver's value of `0x2d` leaves a flat field, `0x08` gives
+///   a usable dynamic range.
+/// * `64 12` — `imagerd`, the readout mode with the best contrast.
+pub const TUNING_SEQUENCE: &[Cmd] = &[
+    Cmd::new(&[0xa0, 0x00, 0x00], 3),
+    Cmd::new(&[0x9c, 0x55, 0x40, 0x00, 0x08, 0x24], 6),
+    Cmd::new(&[0x64, 0x12], 2),
+];
+
+/// Delay between finger-present polls.
+pub const POLL_DELAY: Duration = Duration::from_millis(30);
+/// Number of polls before giving up on a finger.
+pub const POLL_ATTEMPTS: u32 = 2_000;
+
+// ---------------------------------------------------------------------------
+// Status decoding
+// ---------------------------------------------------------------------------
+
+/// Finger-present value of the `0x1c 0x00` status reply.
+pub const STATUS_FINGER: u8 = 0x81;
+/// Idle value of the `0x1c 0x00` status reply.
+pub const STATUS_IDLE: u8 = 0x80;
+/// Ready value of the `0x1c 0x00` status reply.
+pub const STATUS_READY: u8 = 0x20;
+
+/// Interpret the two bytes of a `0x1c 0x00` status reply.
+pub fn decode_status(resp: &[u8]) -> String {
+    match resp.len() {
+        0 => "empty".into(),
+        1 => format!("0x{:02x}", resp[0]),
+        _ => {
+            let state = match resp[1] {
+                STATUS_FINGER => "finger present",
+                STATUS_IDLE => "idle",
+                STATUS_READY => "ready",
+                other => {
+                    return format!(
+                        "0x{:02x} 0x{:02x} (state 0x{other:02x})",
+                        resp[0], resp[1]
+                    )
+                }
+            };
+            format!("0x{:02x} 0x{:02x} ({state})", resp[0], resp[1])
+        }
     }
 }

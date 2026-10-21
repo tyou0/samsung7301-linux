@@ -300,14 +300,10 @@ pub const CAPTURE_SETUP: &[Cmd] = &[
     Cmd::new(&[0x5c, 0x0a], 2),
 ];
 
-/// Capture setup for a full frame read — the sequence the Windows driver
-/// uses before the final image of an enrollment.
-pub const CAPTURE_SETUP_FRAME: &[Cmd] = &[
-    SEQ_CAP,
-    Cmd::new(&[0xa0, 0x0e, 0x06], 3),
-    Cmd::new(&[0x64, 0x1e], 2),
-    Cmd::new(&[0x5c, 0x0b], 2),
-];
+/// Capture setup for a full frame read: the capacitive read and the capture
+/// geometry.  The analogue front end settings are applied separately (see
+/// [`TUNING_SEQUENCE`]) and must not be overwritten here.
+pub const CAPTURE_SETUP_FRAME: &[Cmd] = &[SEQ_CAP, SEQ_FRAME_GEO];
 
 /// The capture setup to use (`strip` or `frame`).
 pub fn capture_setup() -> &'static [Cmd] {

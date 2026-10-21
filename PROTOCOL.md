@@ -1,3 +1,102 @@
+# Protocol of the Samsung `04e8:7301` fingerprint sensor
+
+> This is the *verified* protocol, as implemented in `src/protocol.rs` and
+> `contrib/samsung7301.c`.  For the reverse engineering account (and the
+> earlier, partly wrong conclusions it replaces) see
+> [`docs/REVERSE-ENGINEERING.md`](docs/REVERSE-ENGINEERING.md).
+
+## Transport
+
+Every command exchange is bracketed by vendor control requests on EP0:
+
+```
+1. CTRL-OUT  bRequest=0xc3  wValue=0x0000 wIndex=0x0000, 16 byte heartbeat
+2. CTRL-OUT  bRequest=0xca  wValue=0x0003 wIndex=<reply length>
+3. BULK-OUT  <command bytes>                             (EP 0x01)
+4. BULK-IN   <reply length> bytes                       (EP 0x82)
+5. CTRL-IN   bRequest=0xda  wValue=0x0007, 2 bytes       (doorbell, optional)
+```
+
+The heartbeat payload is fixed:
+
+```
+c0 c6 2d 00 08 00 ff 01 01 01 00 00 00 00 00 00
+```
+
+The **reply length of a command is always the length of the command**.
+
+The doorbell read (step 5) is only used by the opcodes `0x20` (arm),
+`0x28` (init complete), `0xc0` (trigger) and `0xf8` (reset).
+
+## Session
+
+Four vendor control writes open the session:
+
+```
+CTRL-OUT bRequest=0xdb wValue=0x0006 wIndex=0
+CTRL-OUT bRequest=0xdb wValue=0x0006 wIndex=1
+CTRL-OUT bRequest=0xdb wValue=0x000b wIndex=0
+CTRL-OUT bRequest=0xdb wValue=0x000b wIndex=1
+```
+
+This sensor stalls the two `0x000b` writes; the `0x0006` pair is the one
+that matters.
+
+## Bring-up sequence
+
+```
+f8                     reset (doorbell)
+1c 00                  status
+1c 00                  status
+fc 00 00               hardware id -> 00 02 1f
+9c 55 40 00 2d 24      adcsetup
+6c 29 00 90 20         pxlrstdly
+68 31 31 3d 3d         sampledly
+98 03 eb 3f b8 0a 70 11 22 6a 5d   adcweighttbl (calibration)
+8c 12 00 5c b0         fngrdriveconf
+d8 20 00               fngrdetthresh
+dc 00 0a               fngrdetcntr
+5c 0b                  imagesetup
+a8 0f 0a               pxlctrl
+a0 0a 02               adcshiftgain
+28                     init complete (doorbell)
+```
+
+Followed by the tuning of the analogue front end for this chip revision:
+
+```
+a0 00 00               adcshiftgain, gain 0
+9c 55 40 00 08 24      adcsetup
+64 12                  imagerd
+```
+
+## Capture sequence
+
+```
+20                     arm (doorbell)
+1c 00                  status; 0x81 means "finger present"
+d4 00 00 00 00         capacitive read
+54 00 a0 00 a0         capture geometry: 160 rows, 160 columns
+c0                     trigger (doorbell)
+c4 <25602 bytes>       read the image (padded command, concurrent transfer)
+```
+
+The image reply starts with a two byte header, the rest is 160x160 pixels of
+one byte each.
+
+## Status codes
+
+The `1c 00` reply is two bytes; the second one is the state:
+
+| value | meaning |
+|---|---|
+| `0x00` | idle |
+| `0x01` | finger detected |
+| `0x81` | finger present |
+| `0xff` | not initialised yet |
+
+---
+
 # Protocol notes — Samsung `04e8:7301`
 
 > **Status: derived from the vendor driver, not yet confirmed over the wire.**

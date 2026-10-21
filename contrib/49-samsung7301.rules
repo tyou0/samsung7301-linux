@@ -1,0 +1,27 @@
+/* Polkit rule for the Samsung 04e8:7301 fingerprint reader.
+ *
+ * The default rules for org.freedesktop.fprintd.device.* are "auth_self_keep",
+ * which means a password prompt is shown the first time a fingerprint is used
+ * for enrolling, deleting or verifying.  On a system without a polkit agent
+ * (a plain Hyprland session, for example) there is nobody to answer that
+ * prompt, so the fingerprint can never be used.
+ *
+ * This rule allows the *active local session* of one user to use the reader
+ * without a prompt.  Other users, inactive sessions and remote logins still
+ * have to authenticate in the usual way.
+ *
+ * Install with:
+ *   sudo install -m644 contrib/49-samsung7301.rules /etc/polkit-1/rules.d/
+ *
+ * Adjust the user name if needed.
+ */
+polkit.addRule(function (action, subject) {
+    if (subject.user == "tyou" && subject.isActive && subject.local) {
+        if (action.id == "net.reactivated.fprint.device.enroll" ||
+            action.id == "net.reactivated.fprint.device.verify" ||
+            action.id == "net.reactivated.fprint.device.list" ||
+            action.id == "net.reactivated.fprint.device.delete") {
+            return polkit.Result.YES;
+        }
+    }
+});

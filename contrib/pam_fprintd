@@ -1,0 +1,10 @@
+# Fingerprint authentication for pam_fprintd.
+#
+# Install with:
+#   sudo install -m644 contrib/pam_fprintd /etc/pam.d/
+# and add "auth sufficient pam_fprintd.so" to the auth stack of the services
+# that should accept a fingerprint (sudo, login, ...).
+#
+# pam_fprintd falls back to the other modules in the stack when no
+# fingerprint matches, so the password still works.
+auth        sufficient      pam_fprintd.so

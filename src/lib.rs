@@ -213,9 +213,6 @@ impl Sensor {
         for cmd in protocol::CAPTURE_SETUP_FRAME {
             t.exchange(cmd.bytes, cmd.reply_len, cmd.doorbell)?;
         }
-        // Set the capture geometry to the full frame.
-        let geo = protocol::SEQ_FRAME_GEO;
-        t.exchange(geo.bytes, geo.reply_len, false)?;
 
         // Trigger the exposure.
         t.exchange(

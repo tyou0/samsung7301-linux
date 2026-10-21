@@ -478,3 +478,113 @@ channel. `hw_usb_write` (`0x18000ad1c`) is the bulk-data sender; the
 This supersedes §5. The exact `wValue` depends on the chip; `0x0b` is the value
 used for `0x474`, and the driver's chip tables list `0x4ec` (FPC1022) for this
 laptop.
+
+---
+
+## 7. The final protocol (2026-10-21)
+
+Sections 1–6 describe the reverse engineering of the Windows driver.  This
+section records what was *verified on the hardware* afterwards, and where the
+earlier conclusions had to be corrected.
+
+### 7.1 The transport
+
+The sensor is a **FPC1021** (revision `0x1f`), 160x160 pixels.  The
+`hwid` command answers `00 02 1f` and `imgcapsize` reports `0xa0 x 0xa0`,
+which matches the `0x3fd` (FPC1021) entry of the driver's chip table.
+
+Every command exchange is:
+
+```
+1. CTRL-OUT  bRequest=0xc3  wValue=0x0000 wIndex=0x0000, 16 byte heartbeat
+2. CTRL-OUT  bRequest=0xca  wValue=0x0003 wIndex=<reply length>
+3. BULK-OUT  <command bytes>                             (EP 0x01)
+4. BULK-IN   <reply length> bytes                       (EP 0x82)
+5. CTRL-IN   bRequest=0xda  wValue=0x0007, 2 bytes       (doorbell, optional)
+```
+
+The **reply length always equals the length of the command**.  The `0xca`
+request tells the sensor how many bytes to stage on the bulk IN pipe.
+
+The session is opened with four `0xdb` writes: `wValue` 0x0006 and 0x000b,
+each with `wIndex` 0 and 1.  This part of the sensor **stalls the `0x000b`
+writes**; the `0x0006` pair is the one that matters.
+
+The `0xc3` heartbeat payload is fixed:
+
+```
+c0 c6 2d 00 08 00 ff 01 01 01 00 00 00 00 00 00
+```
+
+This transport was cross checked against the USB capture of the same driver
+family published in libfprint merge request !586 (`04e8:7305`); the capture
+matches byte for byte.
+
+### 7.2 The image read has to be concurrent
+
+The image is transferred with a `0xc4` command padded to the length of the
+transfer (25602 bytes for a 160x160 frame plus a two byte header).  The sensor
+**starts streaming the frame while the host is still writing that padded
+command**, so the bulk IN has to be submitted *before* the bulk OUT.  With a
+sequential read only the last few hundred bytes arrive; with the read armed
+first the whole frame arrives.
+
+The same applies to the Rust implementation, which uses raw libusb
+asynchronous transfers for this.
+
+### 7.3 The per-chip configuration table
+
+The Windows driver builds a table of 16 bit words and walks it into
+"register, value, ..." frames (`0x180007dd8`); the word `0x0100` ends a
+frame and the low byte of every other word is appended to it.  For the
+FPC1021 (`0x3fd`) the table is:
+
+```
+9c 55 40 00 2d 24
+6c 29 00 90 20
+68 31 31 3d 3d
+98 03 eb 3f b8 0a 70 11 22 6a 5d
+8c 12 00 5c b0
+d8 20 00
+```
+
+followed by the `dc 00 0a` command that `0x180005e24` sends for this chip.
+
+The equivalent sequence for the sibling `04e8:7305` (chip `0x474`) is what
+the capture in !586 shows, which confirms the interpretation.
+
+### 7.4 The analogue front end has to be retuned
+
+The driver's settings are for revision `0x10`.  On revision `0x1f` they
+saturate the sensor: the frame is a flat field at 246/255 with a handful of
+darker pixels, and only the first eight rows of a frame carry any data at
+all.
+
+Two registers matter, and both were found by sweeping them with a finger on
+the sensor and measuring the standard deviation of the frame:
+
+| command | driver's value | working value | effect |
+|---|---|---|---|
+| `a0 00 00` (`adcshiftgain`) | `a0 0a 02` | `a0 00 00` | gain 0 instead of 0x10 |
+| `9c 55 40 00 2d 24` (`adcsetup`) | `9c 55 40 00 2d 24` | `9c 55 40 00 08 24` | the fourth argument |
+
+With those, a frame has a standard deviation of ~30 instead of ~2, and every
+row carries data.
+
+`64 12` (`imagerd`) is the readout mode with the best contrast.
+
+### 7.5 What still does not work
+
+The frames are not a clean fingerprint image: they are a mostly flat field
+with a strong per-column pattern and no periodicity in the ridge direction.
+The capacitive finger detection works (status `0x81`), so the finger is on
+the sensor, but the optical image does not show the ridges.
+
+Enrolment and verification still work with those frames — libfprint's minutiae
+detector finds enough points in them — but the bozorth3 match threshold has
+to be lowered from 40 to 15, which raises the false accept rate.
+
+The most likely explanation is that the sensor needs a per-revision
+calibration table that the 2018 driver does not contain: the driver's own chip
+detection (`fpc_wbdi.dll+0x180005c78`) does not know the `0x1f` revision
+either, it only knows `0x00`–`0x0f` and `0x10` for the `0x02` family.

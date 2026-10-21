@@ -1,115 +1,130 @@
-# samsung7301-linux
+# Samsung 04e8:7301 fingerprint sensor — Linux driver
 
-Userspace Linux driver work for the **Samsung `04e8:7301`** fingerprint sensor
-found in the Samsung Notebook 9 (`NT900X5V` / `900X5T`, and likely siblings).
+Userspace driver for the **Samsung `04e8:7301`** fingerprint sensor found in
+the Samsung Notebook 9 (`NT900X5V` / `900X5T`).
 
-> **Status: research / not usable for authentication yet.**
-> This repository contains a descriptor probe and the protocol recovered from
-> the official Samsung Windows driver by static analysis. It does **not** yet
-> enroll or verify fingerprints. Do not point PAM at it.
+The repository contains two things:
 
-## Why userspace (and not a kernel module)
+* **`samsung7301`** — a Rust implementation of the sensor protocol
+  ([`src/`](src)).  It is the reference implementation and the tool that was
+  used to reverse engineer the sensor.
+* **[`contrib/samsung7301.c`](contrib/samsung7301.c)** — a libfprint driver so
+  that the stock `fprintd` can use the sensor for login and `sudo`.
 
-Fingerprint sensors on Linux are driven from **userspace** by
-[libfprint](https://fprint.freedesktop.org/) over
-[libusb](https://libusb.info/). The kernel intentionally leaves these devices on
-the generic `usb` driver so libusb can claim the interface. That is why:
+The sensor had **no driver at all** on Linux: `fprintd` did not even know the
+device existed (`NoSuchDevice: No devices available`).  Both parts were
+written from scratch by reverse engineering Samsung's own Windows driver.
 
-- `lsusb -t` shows `Driver=usb` for `04e8:7301`, and
-- `fprintd` is the component that reports `No devices available` — it has no
-  matching driver, not a missing kernel module.
+## Status
 
-A Rust-for-Linux kernel module would sit at the wrong layer and would not
-integrate with `fprintd` / `pam_fprintd`. A Rust **userspace** driver can: either
-by implementing the libfprint driver logic behind a compatible interface, or by
-talking to the sensor directly and exposing a credential path to PAM.
-
-## Why Rust
-
-The USB replies are untrusted, length-prefixed blobs assembled from an
-undocumented protocol. Rust's bounds-checked slicing and explicit error handling
-remove a class of parsing bugs that image-based fingerprint drivers are prone to.
-It is a safety and maintainability argument — **not** a way around the reverse
-engineering.
-
-## Hardware
-
-| Field | Value |
+| | |
 |---|---|
-| Laptop | Samsung Notebook 9 `NT900X5V-A39A` (`900X5T`) |
-| USB ID | `04e8:7301` Samsung Electronics "Fingerprint Device" |
-| Class | Vendor-specific (255/2/0), no kernel driver |
-| Endpoints | 1 OUT bulk (`0x01`), 1 IN bulk (`0x82`), 1 IN interrupt (`0x83`) |
-| bcdDevice | `0x0000` |
+| `fprintd` device discovery | works |
+| Enrolment (`fprintd-enroll`) | works, 5 stages |
+| Verification (`fprintd-verify`) | works |
+| `sudo` unlock with a fingerprint | works |
+| Image quality | usable for matching, but noisy (see below) |
 
-The sensor is an **FPC (Fingerprint Cards AB)** part. Samsung's own Windows
-driver INF (`fpc_wbdi_um_usb.inf`, v3.23.0.15) binds `USB\VID_04E8&PID_7301`
-*and* `PID_7305` to the same "FPC Fingerprint Reader" stack, and the driver
-recognises the FPC1020/1021/1022/1025/1035/1140/1145/1150/1155/1260/1265
-families. The former "borrowed 7305 transport" hypothesis has been retired.
+## Quick start
 
-The command opcode table, the `40 c3` / `40 ca` bulk framing, the register
-configuration table, and the chunking rules in [`PROTOCOL.md`](PROTOCOL.md) were
-recovered by disassembling that Windows driver — see
-[`docs/REVERSE-ENGINEERING.md`](docs/REVERSE-ENGINEERING.md) for the full
-account, including how the driver package was downloaded from Samsung's own
-update backend.
+```sh
+# 1. permissions for the sensor
+sudo install -m644 contrib/99-samsung-7301.rules /etc/udev/rules.d/
+sudo udevadm control --reload && sudo udevadm trigger
 
-## Build & run
+# 2. build and install the libfprint driver
+git clone https://gitlab.freedesktop.org/libfprint/libfprint.git
+cd libfprint
+cp /path/to/samsung7301-linux/contrib/samsung7301.c libfprint/drivers/
+# add it to libfprint/meson.build and meson.build, see docs/LIBFPRINT.md
+meson setup build -Ddoc=false -Dintrospection=false
+ninja -C build && sudo ninja -C build install
+sudo ldconfig
 
-Requires Rust (1.75+) and `libusb` development headers.
+# 3. let fprintd use the reader without a polkit prompt (optional, see the
+#    comment in the rule)
+sudo install -m644 contrib/49-samsung7301.rules /etc/polkit-1/rules.d/
+
+# 4. enrol a finger
+fprintd-enroll "$USER" right-index-finger
+
+# 5. use it
+fprintd-verify "$USER"
+```
+
+For `sudo` and the login screen, add `auth sufficient pam_fprintd.so` to the
+`auth` stack of `/etc/pam.d/sudo` and `/etc/pam.d/login` (see
+[`contrib/pam_fprintd`](contrib/pam_fprintd)).
+
+## The sensor
+
+| | |
+|---|---|
+| Laptop | Samsung Notebook 9 `NT900X5V-A39A` |
+| USB ID | `04e8:7301` "Fingerprint Device" |
+| Chip | FPC (Fingerprint Cards AB) FPC1021, revision `0x1f` |
+| Image | 160 x 160 pixels, 8 bit |
+| Endpoints | bulk OUT `0x01`, bulk IN `0x82`, interrupt IN `0x83` |
+
+## Protocol
+
+The sensor speaks the FPC "wbdi" transport.  Every command is bracketed by
+vendor control requests on EP0:
+
+```
+1. CTRL-OUT  bRequest=0xc3  wValue=0x0000 wIndex=0x0000  16 byte heartbeat
+2. CTRL-OUT  bRequest=0xca  wValue=0x0003 wIndex=<reply length>
+3. BULK-OUT  the command bytes                            (EP 0x01)
+4. BULK-IN   <reply length> bytes                        (EP 0x82)
+5. CTRL-IN   bRequest=0xda  wValue=0x0007  2 bytes       (doorbell, optional)
+```
+
+The session is opened with four `0xdb` writes (`wValue` 0x0006 and 0x000b,
+`wIndex` 0 and 1).  The reply length of a command is always the length of the
+command itself.
+
+Two details are easy to get wrong and cost a lot of time:
+
+* **The image read has to arm the bulk IN before the bulk OUT is written.**
+  The sensor starts streaming the frame while the host is still writing the
+  padded command, so a sequential read only ever sees the tail of the frame.
+* **The analogue front end has to be retuned for this chip revision.**  The
+  Windows driver ships settings for revision `0x10`; they saturate this
+  sensor at 246/255 and leave almost no information in the frame.
+
+The full account of the reverse engineering — including the Windows driver's
+per-chip configuration table, how it was recovered, and the USB capture it was
+cross checked against — is in
+[`docs/REVERSE-ENGINEERING.md`](docs/REVERSE-ENGINEERING.md).  The command
+set is documented in [`PROTOCOL.md`](PROTOCOL.md).
+
+## Using the Rust tool
 
 ```sh
 cargo build --release
 
-# Read-only: descriptors and endpoints, sends no commands
-./target/release/samsung7301 info
-
-# Hypothesis test: replay the borrowed 7305 status exchange
-sudo ./target/release/samsung7301 status
-
-# Send individual recovered commands and dump replies
-sudo ./target/release/samsung7301 hwid
-sudo ./target/release/samsung7301 reset
-sudo ./target/release/samsung7301 regcfg
-
-# Passive: read the interrupt endpoint for ~3s, sends no commands
-sudo ./target/release/samsung7301 listen
+sudo ./target/release/samsung7301 info       # descriptors, sends nothing
+sudo ./target/release/samsung7301 session    # chip identification
+sudo ./target/release/samsung7301 init       # bring-up sequence
+sudo ./target/release/samsung7301 capture    # one image -> captures/raw.bin
 ```
 
-The device node (`/dev/bus/usb/...`) is root-only by default. Either run with
-`sudo`, or install the udev rule once:
+`SAMSUNG7301_TUNE=1` applies the retuned analogue settings (the defaults
+already include them).
 
-```sh
-sudo install -m644 contrib/99-samsung-7301.rules /etc/udev/rules.d/
-sudo udevadm control --reload && sudo udevadm trigger
-```
+## Known limitations
 
-## Roadmap
-
-- [x] Reproduce the "no devices" failure and identify the sensor
-- [x] Confirm libfprint has no driver for `04e8:7301`
-- [x] Download and reverse engineer the official Samsung Windows driver
-- [x] Recover the command set, framing and register configuration
-- [ ] **Capture the Windows driver's USB traffic** while enrolling/verifying
-      (see [`docs/CAPTURE.md`](docs/CAPTURE.md)) — the blocking step: the
-      bring-up handshake before the first command is not yet known
-- [ ] Validate or replace the framing in `src/protocol.rs` from the capture
-- [ ] Implement the init sequence, image capture and frame assembly
-- [ ] Implement matching, or feed images to libfprint's image helpers
-- [ ] Expose enrollment/verify to PAM (`pam_exec`/custom module) and document
-      `sudo` + lock-screen + display-manager wiring
-- [ ] Submit upstream to libfprint (in C) once the protocol is known
-
-## Contributions
-
-Captures are more valuable than code right now. If you own a `04e8:7301`
-laptop, a USBPcap trace of one enrollment and one successful verify is the
-single most useful artifact you can provide. Please attach it to an issue.
+* The frames are noisy: the sensor reports a mostly flat field with a strong
+  column pattern instead of clean ridges.  Enrolment and verification work
+  with them, but the matching threshold has to be lowered
+  (`BZ3_THRESHOLD` in the libfprint driver) and the false accept rate is
+  therefore higher than on a sensor with a clean image.
+* The image is not corrected for the uneven illumination of the sensor.
 
 ## License
 
-MIT. See [`LICENSE`](LICENSE).
+MIT for the Rust code, LGPL-2.1-or-later for the libfprint driver (it has to
+match libfprint's license).  See [`LICENSE`](LICENSE).
 
-This project is unaffiliated with Samsung. Reverse engineering for
-interoperability is carried out on hardware the contributor owns.
+This project is unaffiliated with Samsung.  Reverse engineering for
+interoperability was carried out on hardware the contributor owns.

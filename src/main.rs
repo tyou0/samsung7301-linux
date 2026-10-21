@@ -33,6 +33,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         "init" => with_handle(&dev, |h| probe_init(h)),
+        "bringup" => with_handle(&dev, |h| probe_bringup(h)),
         "status" => with_handle(&dev, |h| probe_status(h)),
         "reset" => with_handle(&dev, |h| probe_cmd(h, CMD_SOFT_RESET, "soft_reset")),
         "hwid" => with_handle(&dev, |h| probe_cmd(h, CMD_HWID, "hwid")),
@@ -56,20 +57,20 @@ USAGE:
 
 MODES:
     info       (default) print descriptors/endpoints; sends nothing
-    init       control-write the chip-init request (bRequest 0xdb), read the ack
-    status     control-read the status register (bRequest 0xda, wValue 0xd4)
-    reset      bulk soft_reset (0xf8) (may disturb the sensor)
-    hwid       bulk hwid (0xfc) to read the chip ID
+    init       control-write chip init (bRequest 0xdb wValue 0x0006), read ack
+    bringup    full bring-up: control init + bulk register config table
+    status     control-read status register (bRequest 0xda, wValue 0xd4)
+    reset      bulk soft_reset (0xf8)
+    hwid       bulk hwid (0xfc)
     chipcfg    bulk pxlctrl (0xa8) chip-config command
-    regcfg     bulk register configuration table from the vendor driver
+    regcfg     bulk register configuration table
     listen     passively read the interrupt endpoint for ~3 seconds
 
 NOTES:
     The device node is normally root-only. Run with sudo, or install
-    contrib/99-samsung-7301.rules (granted to the logged-in seat).
-    Commands recovered from the vendor driver; see docs/REVERSE-ENGINEERING.md.
-    The command channel is USB *control* transfers (bRequest 0xda/0xdb); the
-    bulk frames (40 c3 / 40 ca) are the image-data path."
+    contrib/99-samsung-7301.rules. Command channel is USB control transfers
+    (bRequest 0xda/0xdb); bulk frames (40 c3/40 ca) are the image-data path.
+    See docs/REVERSE-ENGINEERING.md for full protocol details."
     );
 }
 
@@ -260,6 +261,25 @@ fn listen(handle: &mut DeviceHandle<Context>) -> Result<()> {
                 break;
             }
         }
+    }
+    Ok(())
+}
+
+/// Full bring-up: control-channel init followed by bulk register configuration.
+fn probe_bringup(handle: &mut DeviceHandle<Context>) -> Result<()> {
+    probe_init(handle)?;
+    println!("\n--- sending register configuration ---");
+    probe_regcfg(handle)?;
+    match read_status(handle) {
+        Ok(resp) => {
+            println!(
+                "Final status: ({} bytes) {} -> {}",
+                resp.len(),
+                hex(&resp),
+                decode_status(&resp)
+            );
+        }
+        Err(e) => println!("Failed to read final status: {e:#}"),
     }
     Ok(())
 }

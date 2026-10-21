@@ -1,0 +1,6 @@
+
+2026-10-21 - Major protocol correction
+- Command channel identified as USB control transfers (bmRequestType 0x40/0xC0, bRequest 0xDB/0xDA) via deep RE of fpc_wbdi.dll
+- Control writes: bRequest 0xDB with wValue/wIndex; control reads: bRequest 0xDA with wValue
+- FPC1022 (0x4ec) bringup: control write 0x06,0 then 0x06,1 followed by bulk register config (40 c3/40 ca)
+- Bulk path verified working after control bringup; status register readable via control channel

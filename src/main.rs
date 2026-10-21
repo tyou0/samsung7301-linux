@@ -32,9 +32,11 @@ fn main() -> Result<()> {
             println!("\nRead-only inspection complete. No commands were sent.");
             Ok(())
         }
+        "init" => with_handle(&dev, |h| probe_init(h)),
         "status" => with_handle(&dev, |h| probe_status(h)),
         "reset" => with_handle(&dev, |h| probe_cmd(h, CMD_SOFT_RESET, "soft_reset")),
         "hwid" => with_handle(&dev, |h| probe_cmd(h, CMD_HWID, "hwid")),
+        "chipcfg" => with_handle(&dev, |h| probe_chipcfg(h)),
         "regcfg" => with_handle(&dev, |h| probe_regcfg(h)),
         "listen" => with_handle(&dev, |h| listen(h)),
         other => {
@@ -53,18 +55,21 @@ USAGE:
     samsung7301 [MODE]
 
 MODES:
-    info      (default) print descriptors/endpoints; sends nothing
-    status    send fngrpresentstatus (0xc8) and dump the reply
-    reset     send soft_reset (0xf8) (may disturb the sensor)
-    hwid      send hwid (0xfc) to read the chip ID
-    regcfg    send the register configuration table from the vendor driver
-    listen    passively read the interrupt endpoint for ~3 seconds
+    info       (default) print descriptors/endpoints; sends nothing
+    init       control-write the chip-init request (bRequest 0xdb), read the ack
+    status     control-read the status register (bRequest 0xda, wValue 0xd4)
+    reset      bulk soft_reset (0xf8) (may disturb the sensor)
+    hwid       bulk hwid (0xfc) to read the chip ID
+    chipcfg    bulk pxlctrl (0xa8) chip-config command
+    regcfg     bulk register configuration table from the vendor driver
+    listen     passively read the interrupt endpoint for ~3 seconds
 
 NOTES:
     The device node is normally root-only. Run with sudo, or install
-    contrib/99-samsung-7301.rules (grants the logged-in seat access).
-    Command opcodes come from the vendor driver (docs/REVERSE-ENGINEERING.md);
-    the per-command type byte is still a probe target."
+    contrib/99-samsung-7301.rules (granted to the logged-in seat).
+    Commands recovered from the vendor driver; see docs/REVERSE-ENGINEERING.md.
+    The command channel is USB *control* transfers (bRequest 0xda/0xdb); the
+    bulk frames (40 c3 / 40 ca) are the image-data path."
     );
 }
 
@@ -152,27 +157,70 @@ where
     result
 }
 
-fn probe_status(handle: &mut DeviceHandle<Context>) -> Result<()> {
+/// Perform the chip-init control write(s) recovered from the driver and read
+/// the acknowledgement. This is the real bring-up handshake.
+fn probe_init(handle: &mut DeviceHandle<Context>) -> Result<()> {
+    for cmd in [INIT_FPC1022_0, INIT_FPC1022_1] {
+        println!(
+            "\nChip init: control write bRequest=0x{db:02x}, wValue=0x{v:04x}, wIndex=0x{i:04x} ...",
+            db = CREQ_WRITE,
+            v = cmd.w_value,
+            i = cmd.w_index,
+        );
+        match chip_init(handle, cmd) {
+            Ok(resp) => println!("  ack ({} bytes): {}", resp.len(), hex(&resp)),
+            Err(e) => println!("  {e:#}"),
+        }
+    }
     println!(
-        "\nSending fngrpresentstatus (0x{c8:02x}) ...",
-        c8 = CMD_FNGRPRESENTSTATUS
+        "\nStatus read: control read bRequest=0x{da:02x}, wValue=0x{v:04x}, len={n} ...",
+        da = CREQ_READ,
+        v = STATUS_REG_WVALUE,
+        n = STATUS_READ_LEN,
     );
-    let pkt = bulk_packet(0, &[CMD_FNGRPRESENTSTATUS]);
-    write_packet(handle, &pkt)?;
-    match read_reply(handle, 64) {
+    match read_status(handle) {
         Ok(resp) => {
             println!("  reply ({} bytes): {}", resp.len(), hex(&resp));
             println!("  interpreted: {}", decode_status(&resp));
         }
+        Err(e) => println!("  no reply: {e:#}"),
+    }
+    Ok(())
+}
+
+/// Send the pxlctrl (0xa8) chip-configuration command on the bulk data path.
+fn probe_chipcfg(handle: &mut DeviceHandle<Context>) -> Result<()> {
+    let payload = chip_config(CHIP_ID_FPC1022, 0);
+    println!("\nSending bulk chip config: {}", hex(&payload));
+    write_bulk_command(handle, &payload)?;
+    match read_reply(handle, 64) {
+        Ok(resp) => println!("  reply ({} bytes): {}", resp.len(), hex(&resp)),
         Err(e) => println!("  no usable reply: {e:#}"),
     }
     Ok(())
 }
 
+/// Control-read the status register and dump the decoded word.
+fn probe_status(handle: &mut DeviceHandle<Context>) -> Result<()> {
+    println!(
+        "\nStatus read: control read bRequest=0x{da:02x}, wValue=0x{v:04x}, len={n} ...",
+        da = CREQ_READ,
+        v = STATUS_REG_WVALUE,
+        n = STATUS_READ_LEN,
+    );
+    match read_status(handle) {
+        Ok(resp) => {
+            println!("  reply ({} bytes): {}", resp.len(), hex(&resp));
+            println!("  interpreted: {}", decode_status(&resp));
+        }
+        Err(e) => println!("  no reply: {e:#}"),
+    }
+    Ok(())
+}
+
 fn probe_cmd(handle: &mut DeviceHandle<Context>, op: u8, label: &str) -> Result<()> {
-    println!("\nSending {label} (0x{op:02x}) ...");
-    let pkt = bulk_packet(0, &[op]);
-    write_packet(handle, &pkt)?;
+    println!("\nSending bulk {label} (0x{op:02x}) ...");
+    write_bulk_command(handle, &[op])?;
     match read_reply(handle, 64) {
         Ok(resp) => println!("  reply ({} bytes): {}", resp.len(), hex(&resp)),
         Err(e) => println!("  no usable reply: {e:#}"),
@@ -181,7 +229,7 @@ fn probe_cmd(handle: &mut DeviceHandle<Context>, op: u8, label: &str) -> Result<
 }
 
 /// Send the register configuration table recovered from the driver and dump
-/// each reply. This is the most likely step to bring the sensor to life.
+/// each reply.
 fn probe_regcfg(handle: &mut DeviceHandle<Context>) -> Result<()> {
     let packets = reg_packets(REG_CONFIG_4EC);
     println!("\nSending {} register configuration packets ...", packets.len());

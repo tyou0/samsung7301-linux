@@ -271,3 +271,210 @@ handshake** before the first command.
 A `usbmon` capture of the Windows driver driving this sensor. See
 `docs/CAPTURE.md`. The capture will show the bring-up transfers directly and
 resolve the framing question definitively.
+
+## 5. Bring-up handshake — recovered statically (2026-10-21, later)
+
+A second pass over `fpc_wbdi.dll` used the PE x64 `.pdata` exception directory
+to recover exact function boundaries, then walked the call graph from the two
+framing helpers. That resolved the bring-up path **without needing a capture**.
+
+### 5.1 The three transport primitives
+
+All three live in `.text` and are reached from a small cluster of callers:
+
+| Addr | Role | Wire effect |
+|---|---|---|
+| `0x180008494` | `hw_usb_register_write` | sends `40 c3 00 00` + a 2-byte register value |
+| `0x180008738` | `hw_usb_bulk_write` | sends `40 ca <len_lo> <len_hi> 03 <payload>` |
+| `0x18000a770` | `hw_usb_read` (logged as `hw_usb_read`) | reads a chunked reply |
+
+`hw_usb_write` (`0x18000ad1c`, logged as `hw_usb_write`) is the command
+sender. Its body makes the **ordering explicit**:
+
+```
+zeroes   a 0x6402-byte staging buffer at [dev+0x69f2]
+memcpy   caller buffer -> staging buffer
+call     0x180008494        ; register write   (40 c3 ...)
+call     0x180008738        ; bulk data write  (40 ca <len> 03 <payload>)
+```
+
+So **every command is a register write followed by a bulk write** on the same
+endpoints. There is no control-transfer prelude: the "register" write is itself
+the first bulk packet.
+
+`hw_usb_read` (`0x18000a770`) is the mirror image:
+
+```
+call     0x180008494                 ; arm / clear
+loop:                               ; reads in <=0x6402-byte chunks
+  read chunk -> copy into caller buffer
+  decode reply by case on length (1,2,3,4,else) for logging
+```
+
+### 5.2 The bulk "type byte" is `0x03`
+
+In `hw_usb_bulk_write` (`0x180008738` region) the header dword is built as
+`0x0003ca40`:
+
+```
+40 ca 03 00
+```
+
+That is: `0x40`, `0xca`, then a 16-bit little-endian length, and the byte
+immediately after the header is `0x03`. **`0x03` is the type byte for the
+data path.** (The stale `type_byte` note in `PROTOCOL.md` is superseded.)
+
+### 5.3 The power / mode-set command (single byte)
+
+`0x180008274` is the power-mode setter. It takes a mode byte in `dl`, maps it
+to a flag, and then calls `hw_usb_write` with **length 1** — a one-byte
+command:
+
+| Mode byte | Flag applied |
+|---|---|
+| `0x20` | `0x80` |
+| `0x34` | `0x80` |
+| `0x98` | `0xff` |
+| `0xc0` | (ack check) |
+
+After sending it, it polls the reply byte up to 30 times
+(`call 0x18000a758` → `0x180008e3c`, a 7-unit read) and treats
+**`0xc0` in the reply as success**.
+
+So the first thing the driver does to the device is send a single byte
+(`0x20` / `0x34` / `0x98`) and wait for `0xc0`.
+
+### 5.4 The chip-config command
+
+`0x180007c84` builds the per-chip configuration command. It compares the chip
+ID at `[ctx]` against `0x4ec` (FPC1022):
+
+```
+chip == 0x4ec:  buf = a8 93|00 0f <byte from table 0x61412101>   (len 4)
+otherwise:      buf = a8 0f <byte from table 0xa1a0e1e>          (len 3)
+```
+
+then `call 0x180008470` → `hw_usb_write`. `0xa8` is `pxlctrl` in the opcode
+table; the following bytes are its arguments.
+
+### 5.5 The bring-up state machine
+
+The D0-entry routine near `0x18000b3a4` runs the sequence:
+
+1. read `[ctx+0x90]` / `[ctx+0x94]` (image cols/rows) and compute `cols*rows`;
+2. build a 38-byte (`0x26`) request block;
+3. `call 0x180003284` — the command dispatcher;
+4. inside it, `call 0x1800073e8` — **status poll** — up to 10 times with a
+   10 ms delay (`mov ecx, 0xa; call 0x180007f64`), succeeding once the state
+   code is `< 6`;
+5. `call 0x180003ae0` — send the 3-byte prefix `00 40 eb`;
+6. `call 0x18000782c` — write data;
+7. `call 0x18000592c` — read the reply; result stored at `[ctx+0x518]` /
+   `[ctx+0x51c]`.
+
+The status poll `0x1800073e8` reads a 4-byte register (`dl=0xd4`, size 4 via
+`0x18000811c`) and decodes a **16-bit little-endian status word**
+(`hi*0x100 + lo`), splitting it into individual bits (bit 0 … bit 11) to derive
+the state. This is the interrupt/status register.
+
+### 5.6 Consequence for the probe
+
+The reason the earlier probe saw "length echo" is that it sent raw opcodes
+(`fc`, etc.) as the **very first** transfer. The device had never received the
+power/mode byte, so it never left its default state and echoed the bulk
+length. The correct order is:
+
+```
+1. power/mode byte  (0x20 | 0x34 | 0x98)      -> wait for 0xc0
+2. chip config cmd  (a8 0f <arg>  /  a8 93 0f <arg>)
+3. status poll      (register read 0xd4, len 4) until state < 6
+4. then normal commands, each as reg-write + bulk-write (type 0x03)
+```
+
+Step 1 (`0x20` / `0x34` / `0x98`) plus waiting for `0xc0` is the missing
+handshake.
+
+## 6. CORRECTION — the command channel is control transfers
+
+Section 5 is **superseded**. A later pass found that the register/bulk write
+helpers are only one half of the picture. The other half is a **USB
+control-transfer** helper at `0x180008964` that the register/bulk path never
+calls. Reading the two thin wrappers around it settles the protocol.
+
+### 6.1 The control-transfer primitive
+
+`0x180008964` builds an 8-byte USB setup packet:
+
+```
+neg  r12d                    ; r12d = direction flag (edx)
+sbb  cl, cl                  ; 0xff if flag != 0 else 0x00
+and  cl, 0x80                ; 0x80 (device -> host)  or 0
+and  cl, 0xdf
+or   cl, 0x40                ; -> bmRequestType = 0xC0 (read) | 0x40 (write)
+mov  byte [rbp-0x28], cl     ; bmRequestType
+mov  byte [rbp-0x27], r8b    ; bRequest
+mov  word [rbp-0x26], r9w    ; wValue
+mov  word [rbp-0x24], ax     ; wIndex
+```
+
+It is a **vendor control transfer** (WDF
+`WdfUsbTargetDeviceSendControlTransferSynchronously`), not a bulk transfer.
+
+### 6.2 The two wrappers
+
+| Addr | Direction | bmRequestType | bRequest | wValue | wIndex | wLength |
+|---|---|---|---|---|---|---|
+| `0x180008e3c` | read | `0xC0` | `0xda` | `dl` | `0` | `2` |
+| `0x180008eac` | write | `0x40` | `0xdb` | `dl` | `r8w` | `0` |
+
+So the **command channel** is:
+
+```
+control OUT:  40 db <wValue_lo> <wValue_hi> <wIndex_lo> <wIndex_hi> 00 00   (no data)
+control IN :  c0 da <wValue_lo> <wValue_hi> 00 00 02 00   -> 2 bytes
+control IN :  c0 da <wValue_lo> <wValue_hi> 00 00 04 00   -> 4 bytes (status)
+```
+
+This is the FPC control-request family (`bRequest 0xda`/`0xdb`) — the same
+shape the `fpcmoc` driver uses, but with different request numbers and no
+Match-on-Chip semantics.
+
+### 6.3 The actual bring-up commands
+
+Every chip-specific init call site passes `wValue` in `dl` and `wIndex` in
+`r8b`. Recovered sites:
+
+| Site | chip gate | wValue | wIndex | Meaning |
+|---|---|---|---|---|
+| `0x18000bb37` | `[ctx]==0x474` | `0x0b` | `0` | chip init |
+| `0x18000dab3` | `[ctx+0x6c]==0x474` | `0x0b` | `0` | chip init |
+| `0x18000e52b` | `[ctx+0x6c]==0x474` | `0x0b` | `0` | chip init |
+| `0x180008004` | `[ctx+0x6c]==0x474` | `0x0b` | `1` | chip init (idx 1) |
+| `0x1800042ba` | — | `0x06` | `0` | re-init |
+| `0x1800042d0` | — | `0x06` | `1` | re-init follow-up |
+| `0x180004457` | — | `0x06` | `0` | re-init |
+| `0x180004474` | — | `0x06` | `1` | re-init follow-up |
+
+The read side (`0xda`) is used for the mode acknowledgement (`0x18000a758` →
+`0x180008e3c`, 2 bytes) and for the status register (`0x18000811c` → the
+`0x18000a770` reader, 4 bytes, `wValue=0xd4`).
+
+### 6.4 What the register/bulk frames really are
+
+`40 c3 ...` / `40 ca ...` are **bulk** transfers on the OUT pipe
+(`[dev+0x5b8]`), used by the image/streaming path. They are not the command
+channel. `hw_usb_write` (`0x18000ad1c`) is the bulk-data sender; the
+`0xda`/`0xdb` control requests are how commands are issued.
+
+### 6.5 Corrected bring-up order
+
+```
+1. control OUT  bRequest=0xdb, wValue=0x0b, wIndex=0     ; chip init
+   (and, for some parts, wIndex=1)
+2. control IN   bRequest=0xda, wValue=?                  ; read the ack/status
+3. bulk path for image data
+```
+
+This supersedes §5. The exact `wValue` depends on the chip; `0x0b` is the value
+used for `0x474`, and the driver's chip tables list `0x4ec` (FPC1022) for this
+laptop.

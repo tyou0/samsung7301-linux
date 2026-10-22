@@ -37,7 +37,7 @@ pub mod transport;
 
 use std::time::{Duration, Instant};
 
-use anyhow::{Context as _, Result};
+use anyhow::{bail, Context as _, Result};
 use rusb::{Context, DeviceHandle, UsbContext};
 
 use protocol::{Cmd, IMAGE_LEN, IMG_HEIGHT, IMG_WIDTH};
@@ -248,6 +248,139 @@ impl Sensor {
     pub fn handle_mut(&mut self) -> &mut DeviceHandle<Context> {
         &mut self.handle
     }
+
+    // ── The profile that works on this hardware ──────────────────────────
+
+    /// The bring-up of the working driver.
+    ///
+    /// The factory registers are kept: only the identification is read and
+    /// the capacitive detection is set up.
+    pub fn init_working(&mut self) -> Result<()> {
+        let mut t = Transport::new(&mut self.handle);
+        t.session_open()?;
+        for cmd in protocol::WORKING_INIT {
+            t.exchange(cmd.bytes, cmd.reply_len, cmd.doorbell)
+                .with_context(|| format!("init command {} failed", protocol::op_name(cmd.bytes[0])))?;
+        }
+        for cmd in protocol::WORKING_DETECT {
+            t.exchange(cmd.bytes, cmd.reply_len, cmd.doorbell)
+                .with_context(|| format!("detect command {} failed", protocol::op_name(cmd.bytes[0])))?;
+        }
+        Ok(())
+    }
+
+    /// Read the twelve capacitive detection zones.
+    pub fn detection_zones(&mut self) -> Result<u16> {
+        let mut t = Transport::new(&mut self.handle);
+        let resp = t.exchange(
+            protocol::SEQ_ZONES.bytes,
+            protocol::SEQ_ZONES.reply_len,
+            protocol::SEQ_ZONES.doorbell,
+        )?;
+        if resp.len() < 3 {
+            bail!("short zone reply ({} bytes)", resp.len());
+        }
+        Ok((((resp[1] as u16) << 8) | resp[2] as u16) & 0x0fff)
+    }
+
+    /// Wait until a finger covers the sensor.
+    ///
+    /// The capacitive zones decide, not the interrupt status: at least
+    /// [`protocol::DETECT_ZONES_ON`] of the twelve zones have to be covered.
+    pub fn wait_for_finger_zones(&mut self, timeout: Duration) -> Result<bool> {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            let mut t = Transport::new(&mut self.handle);
+            t.exchange(
+                protocol::SEQ_ARM.bytes,
+                protocol::SEQ_ARM.reply_len,
+                protocol::SEQ_ARM.doorbell,
+            )?;
+            let resp = t.exchange(
+                protocol::SEQ_ZONES.bytes,
+                protocol::SEQ_ZONES.reply_len,
+                protocol::SEQ_ZONES.doorbell,
+            )?;
+            if resp.len() >= 3 {
+                let zones = ((((resp[1] as u16) << 8) | resp[2] as u16) & 0x0fff) as u32;
+                if zones.count_ones() >= protocol::DETECT_ZONES_ON {
+                    return Ok(true);
+                }
+            }
+            std::thread::sleep(protocol::POLL_DELAY);
+        }
+        Ok(false)
+    }
+
+    /// Capture a burst of frames.
+    ///
+    /// The capture gain and the geometry are written once, then every frame
+    /// is triggered, waited for and read on its own.
+    pub fn capture_burst(&mut self, frames: usize, delay: Duration) -> Result<Vec<Image>> {
+        let mut t = Transport::new(&mut self.handle);
+        for cmd in protocol::WORKING_CAPTURE {
+            t.exchange(cmd.bytes, cmd.reply_len, cmd.doorbell)
+                .with_context(|| format!("capture command {} failed", protocol::op_name(cmd.bytes[0])))?;
+        }
+        let mut out = Vec::with_capacity(frames);
+        for i in 0..frames {
+            if i > 0 {
+                std::thread::sleep(delay);
+            }
+            out.push(capture_frame(&mut t)?);
+        }
+        Ok(out)
+    }
+}
+
+/// Capture one frame: trigger the exposure, wait for it, read the image.
+fn capture_frame(t: &mut Transport) -> Result<Image> {
+    t.exchange(
+        protocol::SEQ_TRIGGER.bytes,
+        protocol::SEQ_TRIGGER.reply_len,
+        protocol::SEQ_TRIGGER.doorbell,
+    )?;
+
+    // The sensor reports that the frame is ready in the interrupt word.
+    let mut ready = false;
+    for _ in 0..protocol::EXPOSURE_POLL_MAX {
+        let status = t.exchange(
+            protocol::SEQ_STATUS.bytes,
+            protocol::SEQ_STATUS.reply_len,
+            false,
+        )?;
+        if status.len() >= 2 {
+            let irq = status[1];
+            if irq == protocol::IRQ_REBOOT || (irq & protocol::IRQ_ERROR) != 0 {
+                bail!("sensor reported interrupt {irq:02x}");
+            }
+            if (irq & protocol::IRQ_FIFO_NEW_DATA) != 0 {
+                ready = true;
+                break;
+            }
+        }
+        std::thread::sleep(protocol::EXPOSURE_POLL_DELAY);
+    }
+    if !ready {
+        bail!("no frame after {} polls", protocol::EXPOSURE_POLL_MAX);
+    }
+
+    // The image command is padded to the length of the transfer.
+    let mut cmd = vec![0u8; protocol::IMAGE_LEN];
+    cmd[0] = protocol::CMD_IMAGE_READ;
+    let data = t.exchange_concurrent(&cmd, protocol::IMAGE_LEN)?;
+
+    // The reply starts with a two byte header.
+    let pixels = if data.len() > 2 {
+        data[2..].to_vec()
+    } else {
+        Vec::new()
+    };
+    Ok(Image {
+        width: protocol::IMG_WIDTH,
+        height: protocol::IMG_HEIGHT,
+        data: pixels,
+    })
 }
 
 impl Drop for Sensor {

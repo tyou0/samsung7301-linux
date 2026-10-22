@@ -367,6 +367,48 @@ pub const POLL_DELAY: Duration = Duration::from_millis(30);
 /// Number of polls before giving up on a finger.
 pub const POLL_ATTEMPTS: u32 = 2_000;
 
+// ── The profile that works on this hardware ─────────────────────────────────
+//
+// The sensor keeps the analogue front end it was shipped with, and the driver
+// must not overwrite the factory registers: the generic tables of the Windows
+// driver leave the sensor saturated.  Only the gain and the detection
+// threshold are written.
+
+/// The bring-up sequence: read the identification, change nothing else.
+pub const WORKING_INIT: &[Cmd] = &[SEQ_STATUS, SEQ_STATUS, SEQ_HWID];
+
+/// The gain of the capacitive detection and the threshold that decides
+/// whether a finger covers the sensor.
+pub const WORKING_DETECT: &[Cmd] = &[
+    Cmd::new(&[0xa0, 0x06, 0x02], 3), /* adcshiftgain */
+    Cmd::new(&[0xd8, 0x60], 2),        /* fngrdetthresh */
+];
+
+/// The gain used while the frame is exposed, and the capture geometry.
+pub const WORKING_CAPTURE: &[Cmd] = &[
+    Cmd::new(&[0xa0, 0x09, 0x02], 3), /* adcshiftgain */
+    SEQ_FRAME_GEO,
+];
+
+/// The capacitive read; the reply carries the twelve detection zones.
+pub const SEQ_ZONES: Cmd = Cmd::new(&[0xd4, 0x00, 0x00], 3);
+
+/// The bits of the interrupt word.
+pub const IRQ_FINGER_DOWN: u8 = 0x01;
+pub const IRQ_ERROR: u8 = 0x04;
+pub const IRQ_FIFO_NEW_DATA: u8 = 0x20;
+pub const IRQ_COMMAND_DONE: u8 = 0x80;
+pub const IRQ_REBOOT: u8 = 0xff;
+
+/// At least this many of the twelve zones have to be covered to report a
+/// finger.
+pub const DETECT_ZONES_ON: u32 = 7;
+
+/// Delay between the exposure polls while a frame is being produced.
+pub const EXPOSURE_POLL_DELAY: Duration = Duration::from_millis(10);
+/// Number of exposure polls before a frame is given up on.
+pub const EXPOSURE_POLL_MAX: u32 = 500;
+
 // ---------------------------------------------------------------------------
 // Status decoding
 // ---------------------------------------------------------------------------

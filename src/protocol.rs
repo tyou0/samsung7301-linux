@@ -258,7 +258,8 @@ pub const INIT_SEQUENCE: &[Cmd] = &[
 /// The frames are the per-chip configuration table the Windows driver builds
 /// in `fpc_wbdi.dll+0x180005fa8`; the walker at `+0x180007dd8` turns the
 /// 16-bit word table into "register, value, value, ..." frames, terminated by
-/// the word `0x0100`.
+/// the word `0x0100`.  The `fngrdetcntr` frame is sent separately by
+/// `0x180005e24`.
 pub const INIT_SEQUENCE_1021: &[Cmd] = &[
     SEQ_RESET,
     SEQ_STATUS,
@@ -267,22 +268,27 @@ pub const INIT_SEQUENCE_1021: &[Cmd] = &[
     // adcsetup
     Cmd::new(&[0x9c, 0x55, 0x40, 0x00, 0x2d, 0x24], 6),
     // pxlrstdly
-    Cmd::new(&[0x6c, 0x29, 0x00, 0x90, 0x20], 5),
+    Cmd::new(&[0x6c, 0x29], 2),
+    // fngrdrivedly
+    Cmd::new(&[0x90, 0x32], 2),
     // sampledly
-    Cmd::new(&[0x68, 0x31, 0x31, 0x3d, 0x3d], 5),
+    Cmd::new(
+        &[0x68, 0x31, 0x31, 0x31, 0x31, 0x3d, 0x3d, 0x3d, 0x3d],
+        9,
+    ),
     // adcweighttbl (calibration)
     Cmd::new(
-        &[0x98, 0x03, 0xeb, 0x3f, 0xb8, 0x0a, 0x70, 0x11, 0x22, 0x6a, 0x5d],
+        &[0x98, 0x03, 0xeb, 0x3f, 0xb8, 0x0a, 0x07, 0x11, 0x22, 0x6a, 0x5d],
         11,
     ),
     // fngrdriveconf
-    Cmd::new(&[0x8c, 0x12, 0x00, 0x5c, 0xb0], 5),
-    // fngrdetthresh
-    Cmd::new(&[0xd8, 0x20, 0x00], 3),
-    // fngrdetcntr
-    Cmd::new(&[0xdc, 0x00, 0x0a], 3),
+    Cmd::new(&[0x8c, 0x12], 2),
     // imagesetup
     Cmd::new(&[0x5c, 0x0b], 2),
+    // fngrdetthresh
+    Cmd::new(&[0xd8, 0x20], 2),
+    // fngrdetcntr
+    Cmd::new(&[0xdc, 0x00, 0x0a], 3),
     // pxlctrl
     Cmd::new(&[0xa8, 0x0f, 0x0a], 3),
     // adcshiftgain

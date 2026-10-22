@@ -50,17 +50,22 @@ f8                     reset (doorbell)
 1c 00                  status
 fc 00 00               hardware id -> 00 02 1f
 9c 55 40 00 2d 24      adcsetup
-6c 29 00 90 20         pxlrstdly
-68 31 31 3d 3d         sampledly
-98 03 eb 3f b8 0a 70 11 22 6a 5d   adcweighttbl (calibration)
-8c 12 00 5c b0         fngrdriveconf
-d8 20 00               fngrdetthresh
-dc 00 0a               fngrdetcntr
+6c 29                  pxlrstdly
+90 32                  fngrdrivedly
+68 31 31 31 31 3d 3d 3d 3d    sampledly
+98 03 eb 3f b8 0a 07 11 22 6a 5d   adcweighttbl (calibration)
+8c 12                  fngrdriveconf
 5c 0b                  imagesetup
+d8 20                  fngrdetthresh
+dc 00 0a               fngrdetcntr
 a8 0f 0a               pxlctrl
 a0 0a 02               adcshiftgain
 28                     init complete (doorbell)
 ```
+
+The sequence was re-transcribed from the Windows driver's assembly
+(`fpc_wbdi.dll+0x180005fa8`, word table walker at `+0x180007dd8`); the
+corrected sequence has not been validated on hardware yet.
 
 Followed by the tuning of the analogue front end for this chip revision:
 

@@ -5,10 +5,12 @@
 - The permanent polkit rule (contrib/49-samsung7301.rules) was installed and
   the temporary enrolment-only rule was removed.  Before this, every verify
   asked for a polkit authorisation.
-- Measured the timing of one verification attempt: the burst of 32 frames
-  took 5.8 s (about 182 ms per frame, of which about 102 ms is the USB
-  transfer of the 25600 byte frames over a full-speed link) and the matcher
-  took about 1 s.  The burst is now 16 frames, so an attempt takes about 4 s.
+- Measured the timing of one verification attempt on the sensor: the burst
+  of 32 frames took 5.9 s (about 186 ms per frame, of which about 105 ms is
+  the USB transfer of the 25600 byte frames over a full-speed link) and the
+  matcher took 0.6 s.  The burst is now 16 frames, so an attempt takes
+  3.1 s (2.8 s and 0.3 s) instead of 6.5 s, and the verification still
+  reports verify-match.
 
 2026-10-21 - Driver works: enrolment and verification
 - The transport was corrected once more: every command is a vendor control

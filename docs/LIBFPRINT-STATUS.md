@@ -94,7 +94,7 @@ enrolment, so every finger has to be enrolled again.
 | installed helper on the retained genuine pair | cross score **40.39932150539135** in **both** directions, under MDWE |
 | hardware lifecycle | **4 open / enrol-cancel / close cycles passed**, no warnings |
 | enrolment through `fprintd` | **all 5 stages passed** on 2026-10-22, the print is stored in `fprintd`'s own storage |
-| genuine verification through `fprintd` | **`verify-match`** with the installed stack |
+| genuine verification through `fprintd` | **`verify-match`** with the installed stack, also with the 16 frame burst (`best cross 58.2265`, 4 frames selected) |
 
 The C harness includes the real driver source, so the static helpers it
 drives are the shipped ones and not a copy of them.  It touches no sensor:
@@ -146,10 +146,11 @@ frames, and not through `fprintd` with the installed driver and helper.
 * `sudo` and the login screen are **unvalidated**.  No successful biometric
   authentication has been observed.
 * The old NBIS prints have to be enrolled again; they cannot be used.
-* One verification attempt takes about **4 s**: the burst of 16 frames needs
-  about 2.9 s (about 182 ms per frame, of which about 102 ms is the USB
-  transfer of the 25600 byte frames over a full-speed link) and the matcher
-  needs about 0.4 s.  The burst used to be 32 frames, which took 5.8 s.
+* One verification attempt takes **3.1 s**, measured on the sensor with the
+  16 frame burst: 2.8 s of burst (about 188 ms per frame, of which about
+  105 ms is the USB transfer of the 25600 byte frames over a full-speed
+  link) and 0.3 s of matching.  With the 32 frame burst it took 6.5 s
+  (5.9 s and 0.6 s).
 
 ## The sandbox and the PAM stack
 

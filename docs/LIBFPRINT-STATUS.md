@@ -151,12 +151,13 @@ frames, and not through `fprintd` with the installed driver and helper.
   transfer of the 25600 byte frames over a full-speed link) and the matcher
   needs about 0.4 s.  The burst used to be 32 frames, which took 5.8 s.
 
-## No sandbox and no PAM change
+## The sandbox and the PAM stack
 
-Nothing was changed in `fprintd`'s sandbox and nothing was changed in the
-PAM configuration of the system.  The prepared PAM line is still only the
-snippet in [`../contrib/pam_fprintd`](../contrib/pam_fprintd), which has not
-been installed and has not been validated with a successful authentication.
+Nothing was changed in `fprintd`'s sandbox.  The PAM stack of `sudo` and of
+`polkit-1` carries `auth sufficient pam_fprintd.so`, so a fingerprint is
+offered there; the snippet is in [`../contrib/pam_fprintd`](../contrib/pam_fprintd).
+A `sudo` unlock with a fingerprint has **not** been validated with a
+successful authentication, so the password is still the working credential.
 
 ## The factory profile
 

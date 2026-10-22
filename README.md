@@ -32,7 +32,7 @@ from scratch by reverse engineering Samsung's own Windows driver.
 | Verification (genuine) | **works** — `fprintd` reports `verify-match` |
 | Verification (different finger) | **not run** — a different finger has not been tried |
 | `sudo` unlock with a fingerprint | **not validated** — biometric authentication is still unresolved |
-| Sandbox / PAM | unchanged — no change to `fprintd`'s sandbox and no PAM change was made |
+| Sandbox / PAM | `fprintd`'s sandbox was not changed; the PAM stack of `sudo` and `polkit-1` has `auth sufficient pam_fprintd.so` |
 
 **No successful biometric authentication has been observed.**  Enrolment and
 verification through `fprintd` work; unlocking `sudo` or a login screen with a
@@ -176,11 +176,12 @@ verification through `fprintd` were run on 2026-10-22 with the installed stack
 and both worked; a different-finger rejection and a `sudo` unlock have not been
 run.  Treat the password as the working credential until they are.
 
-For `sudo` and the login screen, add `auth sufficient pam_fprintd.so` to the
-`auth` stack of `/etc/pam.d/sudo` and `/etc/pam.d/login` (see
-[`contrib/pam_fprintd`](contrib/pam_fprintd)).  This is prepared but **not
-validated** with a successful authentication; no change to `fprintd`'s
-sandbox was made either.
+`pam_fprintd.so` is in the `auth` stack of `/etc/pam.d/sudo` and
+`/etc/pam.d/polkit-1` (see [`contrib/pam_fprintd`](contrib/pam_fprintd));
+`/etc/pam.d/sudo.bak-samsung7301` keeps the original file.  A `sudo` unlock
+with a fingerprint is **not validated** with a successful authentication, so
+keep the password as the working credential.  Nothing in `fprintd`'s sandbox
+was changed.
 
 ## The sensor
 

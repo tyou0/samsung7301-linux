@@ -1,3 +1,15 @@
+2026-10-22 - Enrolment and verification work
+- The enrolment completed all five stages through fprintd with the installed
+  stack, and a genuine verification reported verify-match.  The print is
+  stored in fprintd's own storage as an FPI_PRINT_RAW print.
+- The permanent polkit rule (contrib/49-samsung7301.rules) was installed and
+  the temporary enrolment-only rule was removed.  Before this, every verify
+  asked for a polkit authorisation.
+- Measured the timing of one verification attempt: the burst of 32 frames
+  takes 5.8 s (about 182 ms per frame, of which about 102 ms is the USB
+  transfer of the 25600 byte frames over a full-speed link) and the matcher
+  takes about 1 s.
+
 2026-10-21 - Driver works: enrolment and verification
 - The transport was corrected once more: every command is a vendor control
   request pair (0xc3 heartbeat, 0xca reply-length prime), a bulk OUT of the

@@ -537,18 +537,58 @@ asynchronous transfers for this.
 The Windows driver builds a table of 16 bit words and walks it into
 "register, value, ..." frames (`0x180007dd8`); the word `0x0100` ends a
 frame and the low byte of every other word is appended to it.  For the
-FPC1021 (`0x3fd`) the table is:
+FPC1021 (`0x3fd`) the table in `0x180005fa8` is:
 
 ```
 9c 55 40 00 2d 24
-6c 29 00 90 20
-68 31 31 3d 3d
-98 03 eb 3f b8 0a 70 11 22 6a 5d
-8c 12 00 5c b0
-d8 20 00
+6c 29
+90 32
+68 31 31 31 31 3d 3d 3d 3d
+98 03 eb 3f b8 0a 07 11 22 6a 5d
+8c 12
+5c 0b
+d8 20
 ```
 
 followed by the `dc 00 0a` command that `0x180005e24` sends for this chip.
+
+An earlier transcription of this table merged frames across the `0x0100`
+terminators; the frames above are the corrected ones, read out of the
+assembly.
+
+The table was re-checked against the binary with Ghidra (the `fpc_wbdi.dll`
+of the same package, sha256
+`c75c8826b7cda314131228e7fb1de9eeb20a79e55a9e3c89bd73376ed2edc490`).
+Decompiling `0x180005fa8` and the walker `0x180007dd8` reproduces the frames
+above exactly, and it also shows two things that the hand transcription had
+missed:
+
+* The walker stops a frame after **20 bytes** (`0x14`); a longer frame is an
+  error and aborts the table.  The longest frame above, the calibration
+  table, is 11 bytes.
+* The table is selected by the chip id: `0x180005fa8` is the FPC1021
+  (`0x3fd`) variant, and its sibling for the `0x3fc` chip is a different
+  one.  The `dc 00 0a` command is sent by `0x180005e24`, which is called
+  after the table, only when the table was accepted.
+
+The table was re-derived with the REA skill and the Ghidra provider, from
+the same `fpc_wbdi.dll` (sha256
+`c75c8826b7cda314131228e7fb1de9eeb20a79e55a9e3c89bd73376ed2edc490`).
+Decompiling `0x180005fa8` and `0x180007dd8` reproduces the frames above
+byte for byte, and confirms three further points:
+
+* the walker reads **16 bit** words and appends the **low** byte of every
+  word that is not `0x0100`; the word `0x0100` ends the current frame,
+* a frame may be at most **20 bytes** (`0x14`); the walker refuses a longer
+  one,
+* the table has **two** variants, selected by the flag at offset `0x50` of
+  the device structure.  The FPC1021 (`0x3fd`) is the one above; the other
+  one starts with `9c 55 40 00 2d 24 / 90 09 / 68 08 08 08 08 14 14 14 14`
+  and is used for the other chip revisions.
+
+`0x180005e24` sends the `dc 00 0a` command.  Its decompilation shows the
+same command length varies with the chip revision: 3 bytes for `0x3fc` and
+`0x3fd`, 5 bytes for `0x3fe`, `0x474` and `0x47e`, and 8 bytes for `0x4ec`.
 
 The equivalent sequence for the sibling `04e8:7305` (chip `0x474`) is what
 the capture in !586 shows, which confirms the interpretation.
@@ -580,9 +620,12 @@ with a strong per-column pattern and no periodicity in the ridge direction.
 The capacitive finger detection works (status `0x81`), so the finger is on
 the sensor, but the optical image does not show the ridges.
 
-Enrolment and verification still work with those frames — libfprint's minutiae
-detector finds enough points in them — but the bozorth3 match threshold has
-to be lowered from 40 to 15, which raises the false accept rate.
+Enrolment and verification ran with those frames in an earlier session, with
+the bozorth3 match threshold lowered to 15.  Those logs do not establish that
+the matching works reliably, and no genuine/impostor validation has been
+done; the enrolment was cancelled, so no finger is enrolled at the moment.
+The driver keeps libfprint's default threshold of 40 until such a validation
+exists.
 
 The most likely explanation is that the sensor needs a per-revision
 calibration table that the 2018 driver does not contain: the driver's own chip

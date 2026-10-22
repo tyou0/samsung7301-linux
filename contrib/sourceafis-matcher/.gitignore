@@ -1,0 +1,3 @@
+# Build output of the NativeAOT publish
+bin/
+obj/

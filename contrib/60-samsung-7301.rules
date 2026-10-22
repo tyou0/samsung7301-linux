@@ -1,0 +1,8 @@
+# Allow the logged-in seat user to open the sensor (libusb needs the raw node).
+# Without this, every mode except `info` requires sudo.
+#
+# The name of the file matters: the rule has to be read before
+# 73-seat-late.rules, because that is the rule that actually applies the
+# ACL.  It only does so when the "uaccess" tag is already set, and a rule
+# with a higher number would set the tag too late.
+SUBSYSTEM=="usb", ATTR{idVendor}=="04e8", ATTR{idProduct}=="7301", TAG+="uaccess"

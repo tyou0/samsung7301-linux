@@ -20,24 +20,25 @@ The sensor had **no driver at all** on Linux: `fprintd` did not even know the
 device existed (`NoSuchDevice: No devices available`).  All parts were written
 from scratch by reverse engineering Samsung's own Windows driver.
 
-## Status (2026-10-22)
+## Status (2026-10-25)
 
 | | |
 |---|---|
 | `fprintd` device discovery | works |
-| Driver | plain `FpDevice`, native 160x160 frames, burst of 16 frames 80 ms apart, 150 ms settle after the finger is detected |
+| Driver | plain `FpDevice`, native 160x160 frames; verification checks after 4 frames and falls back to 16; enrollment uses 16 frames; 80 ms spacing, 150 ms settle |
 | Matcher | SourceAFIS 3.14 in a separate native helper, threshold 40, never lowered |
 | Stored print | protected `FPI_PRINT_RAW` print, version `samsung7301-sourceafis-v1` |
 | Enrolment | **completed** — all 5 stages passed, the print is stored in `fprintd`'s own storage |
 | Verification (genuine) | **works** — `fprintd` reports `verify-match` |
 | Verification (different finger) | **not run** — a different finger has not been tried |
-| `sudo` unlock with a fingerprint | **not validated** — biometric authentication is still unresolved |
+| `sudo` unlock with a fingerprint | **not validated** — a successful direct sudo authentication has not been observed |
 | Sandbox / PAM | `fprintd`'s sandbox was not changed; the PAM stack of `sudo` and `polkit-1` has `auth sufficient pam_fprintd.so` |
 
-**No successful biometric authentication has been observed.**  Enrolment and
-verification through `fprintd` work; unlocking `sudo` or a login screen with a
-fingerprint does not.  Everything below reports what was measured and what is
-still open.
+Enrolment and verification through `fprintd` work. On 2026-10-25, the
+optimized driver verified a fingerprint in **1.21 seconds** during system
+authorization. Direct sudo authentication and login-screen timing remain
+unvalidated. Earlier missed touches remain unexplained; one successful
+verification does not establish detection reliability.
 
 ### The installed stack
 
@@ -45,7 +46,7 @@ The driver and the helper are installed on this machine:
 
 | file | sha256 |
 |---|---|
-| `/usr/local/lib/libfprint-2.so.2.0.0` | `3c241ac5f7a3d2ccc92a49c29cbd84a8b47109ade277b6d19973381ab579507a` |
+| `/usr/local/lib/libfprint-2.so.2.0.0` | `8737b210534fa5610c396247e2ccd005efe065750d2f4a46a04e333c6b92be55` |
 | `/usr/local/libexec/libfprint-samsung7301-afis` | `2671d4360cff3c0f0c962921b4b6a4411fd23767fc163dfc68442a10f46ccae0` |
 
 The helper is `root:root` with mode `755`.  The driver starts it with a
@@ -53,9 +54,12 @@ fixed absolute path, without a shell and without any argument; the path is
 not taken from the environment, from a print or from any other source.
 
 The driver no longer uses libfprint's image device interface.  It is a plain
-`FpDevice` that captures the native 160x160 frames itself, takes a burst of
-16 frames 80 ms apart after the finger has rested on the sensor for 150 ms,
-and hands the frames to the helper over a pipe.  The helper prints one result
+`FpDevice` that captures the native 160x160 frames itself, 80 ms apart after
+the finger has rested on the sensor for 150 ms, and hands the frames to the
+helper over a pipe. Verification checks after 4 frames and, if necessary,
+continues the same burst to 16 frames. It restores the detection profile
+and finishes without waiting for finger removal. Enrollment still uses
+16 frames and requires finger removal between stages. The helper prints one result
 line, the driver validates that line and the exit status of the helper, and
 the run is bounded by 15 seconds.
 
@@ -117,15 +121,25 @@ anyone.  The installed stack still has to prove itself end to end.
 
 * A **different-finger rejection through `fprintd`** with the installed stack
   has **not been run**.
-* `sudo` and the login screen are **unvalidated**; biometric authentication
-  is still unresolved.
-* The **capture burst was shortened**: 16 frames instead of 32.  The burst
+* Direct `sudo` authentication and login-screen timing are **unvalidated**.
+* Before early matching, the **capture burst was shortened**: 16 frames instead of 32.  The burst
   dominated the time of an attempt, and the matcher selects at most four of
   the frames.  Measured with the real stored frames, the best cross score is
   already the same for 12 probes as for 15, so the longer burst only added
-  waiting time.  Measured on the sensor, one attempt now takes **3.1 s**
+  waiting time.  Measured on the sensor, one attempt then took **3.1 s**
   (2.8 s of burst and 0.3 s of matching) instead of **6.5 s**; the
   verification still reports `verify-match`.
+
+### Verification latency fix (2026-10-23)
+
+The installed C driver now checks verification after 4 frames, falls back to
+16 frames when needed, and finishes without waiting for finger removal.
+The match threshold and enrollment behavior are unchanged. The build,
+regression checks, and independent review passed. A successful four-frame
+verification on 2026-10-25 took **1.21 seconds** from finger detection to
+`verify-match`. Earlier tests reported zero contact zones despite the user
+holding a finger on the reader; that intermittent failure remains unexplained.
+See [latency measurements and installation status](docs/LIBFPRINT-STATUS.md#verification-latency-fix-2026-10-23).
 
 ## Quick start
 

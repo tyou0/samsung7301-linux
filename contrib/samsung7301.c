@@ -107,6 +107,7 @@ static const FpIdEntry id_table[] = {
  * over the four the matcher can use.
  */
 #define CAPTURE_FRAMES 16
+#define VERIFY_EARLY_FRAMES 4
 
 /* The delay between two frames of the burst. */
 #define BURST_DELAY  80 /* ms */
@@ -1775,6 +1776,14 @@ s7301_burst_next (FpiDeviceSamsung7301 *self)
       return;
     }
 
+  if (self->verifying &&
+      (self->frames->len == VERIFY_EARLY_FRAMES ||
+       self->frames->len == CAPTURE_FRAMES))
+    {
+      fpi_ssm_jump_to_state (self->ssm, C_HELPER);
+      return;
+    }
+
   if (self->frames->len < CAPTURE_FRAMES)
     {
       /* The next frame of the burst; the capture gain stays in place. */
@@ -1855,12 +1864,18 @@ s7301_detect_setup_done (FpDevice *dev, FpiSsm *ssm, const guint8 *resp, gsize l
 static void
 s7301_restore_detect_done (FpDevice *dev, FpiSsm *ssm, const guint8 *resp, gsize len, GError *error)
 {
+  FpiDeviceSamsung7301 *self = FPI_DEVICE_SAMSUNG7301 (dev);
+
   if (error)
     {
       fpi_ssm_mark_failed (ssm, error);
       return;
     }
-  fpi_ssm_next_state (ssm);
+
+  if (self->verifying)
+    fpi_ssm_mark_completed (ssm);
+  else
+    fpi_ssm_next_state (ssm);
 }
 
 /* A fresh finger query has to be issued before the finger-off decision can
@@ -2086,8 +2101,23 @@ s7301_result (FpiDeviceSamsung7301 *self)
       return;
     }
 
+  if (self->frames->len == VERIFY_EARLY_FRAMES &&
+      result->quality_max >= AFIS_THRESHOLD &&
+      result->best_cross >= AFIS_THRESHOLD)
+    {
+      s7301_verify_result (self);
+      fpi_ssm_jump_to_state (self->ssm, C_RESTORE_DETECT);
+      return;
+    }
+
+  if (self->frames->len < CAPTURE_FRAMES)
+    {
+      fpi_ssm_jump_to_state_delayed (self->ssm, C_TRIGGER, BURST_DELAY);
+      return;
+    }
+
   s7301_verify_result (self);
-  fpi_ssm_mark_completed (self->ssm);
+  fpi_ssm_jump_to_state (self->ssm, C_RESTORE_DETECT);
 }
 
 static void
@@ -2189,6 +2219,10 @@ s7301_capture_complete (FpiSsm *ssm, FpDevice *dev, GError *error)
 {
   FpiDeviceSamsung7301 *self = FPI_DEVICE_SAMSUNG7301 (dev);
   FpPrint *enroll_print = self->enroll_print;
+
+  /* Verification completion reports finger-off; keep the next scan in sync. */
+  if (self->verifying)
+    self->finger_present = FALSE;
 
   self->ssm = NULL;
   self->enroll_print = NULL;

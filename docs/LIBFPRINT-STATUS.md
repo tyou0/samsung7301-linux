@@ -1,6 +1,6 @@
 # libfprint driver status
 
-*Current as of 2026-10-22.*
+*Current as of 2026-10-25.*
 
 This document describes the **current** stack, the measurements that were
 made with it, and what is still open.  The earlier NBIS/bozorth3 approach
@@ -13,7 +13,7 @@ Two files are installed on this machine:
 
 | file | sha256 |
 |---|---|
-| `/usr/local/lib/libfprint-2.so.2.0.0` | `3c241ac5f7a3d2ccc92a49c29cbd84a8b47109ade277b6d19973381ab579507a` |
+| `/usr/local/lib/libfprint-2.so.2.0.0` | `8737b210534fa5610c396247e2ccd005efe065750d2f4a46a04e333c6b92be55` |
 | `/usr/local/libexec/libfprint-samsung7301-afis` | `2671d4360cff3c0f0c962921b4b6a4411fd23767fc163dfc68442a10f46ccae0` |
 
 The helper is `root:root` with mode `755`.
@@ -28,7 +28,7 @@ the helper.
 | | |
 |---|---|
 | frame | native 160x160, 8 bit grey, no header, no resizing |
-| burst | 16 frames, 80 ms apart |
+| burst | verification checks after 4 frames and falls back to 16; enrollment uses 16; 80 ms apart |
 | settle | 150 ms of contact before the first exposure |
 | finger | decided by the capacitive zones, 7 of 12 covered |
 | USB interface | claimed explicitly, released on close and on a failed open |
@@ -139,14 +139,64 @@ These numbers are **not** a proof that the installed stack authenticates
 anyone: they were produced by a separate program in `/tmp`, against retained
 frames, and not through `fprintd` with the installed driver and helper.
 
+## Verification latency fix (2026-10-23)
+
+Before the latency fix, a successful verification took **4.83 s** from
+finger detection to `verify-match`: about 3.06 s capturing 16 frames,
+1.28 s waiting for the finger to be lifted, then 0.50 s matching. The
+old finger-removal wait could last indefinitely while the finger stayed down.
+A later successful run took **8.00 s**, including **4.53 s** waiting for
+finger removal.
+
+The installed C driver now checks a verification after **4 frames**. It accepts
+an early match only when both capture quality and the identity score reach
+the existing threshold of **40**. Otherwise it retains those frames and
+continues to the original **16-frame** limit before deciding mismatch or
+requesting another press. Verification restores the detection profile and
+finishes without waiting for finger removal.
+
+Enrollment still captures 16 frames and requires finger removal between
+stages. Frame spacing, settle time, the matcher, and existing stored prints
+are unchanged. The experimental Rust backend still uses its original
+16-frame verification path.
+
+The `working-state` tag preserves the user-confirmed working revision
+`a58c4b4`. Its installed library was backed up at
+`/tmp/samsung7301-latency-20261023/working-state/libfprint-2.so.2.0.0` before
+the new library was installed and fprintd restarted successfully. The
+installed-library hashes above identify the new build. The source builds
+successfully and the libfprint test suite reports
+5 passed, 0 failed, and 33 skipped. The hardware-free regression harness
+(`python3 tools/test-samsung7301-latency.py`) also passes; it compiles the
+production callbacks with stubs and checks early matching, fallback,
+enrollment transitions, restoration errors, cancellation, and the next scan.
+Independent code review found no actionable issues.
+
+On **2026-10-25**, the optimized driver completed a genuine verification
+in **1.21 seconds** from finger detection to `verify-match`, during system
+authorization. The system journal for fprintd PID 236538 records all 12
+contact zones covered, four captured frames, capture quality **69.5051**,
+and cross score **45.2941**, above the unchanged threshold of 40. This is
+one observed successful verification, not a measurement of lock-screen
+unlock time or a reliability benchmark.
+
+Two earlier timed tests reported zero covered zones throughout, despite
+the user holding a finger on the reader. A read-only comparison of the
+preserved working binary and the optimized binary found the same detection
+code and register settings. The cause of those missed touches remains
+unknown. The working library was temporarily restored for a comparison;
+the optimized library with the hash above was then reinstalled and fprintd
+restarted successfully.
+
 ## Still open
 
 * A **different-finger rejection through `fprintd`** with the installed stack
   has **not been run**.
-* `sudo` and the login screen are **unvalidated**.  No successful biometric
-  authentication has been observed.
+* Direct `sudo` authentication and login-screen timing are **unvalidated**.
+* The earlier zero-zone detection failures remain unexplained. A later
+  successful match does not establish reliable finger detection.
 * The old NBIS prints have to be enrolled again; they cannot be used.
-* One verification attempt takes **3.1 s**, measured on the sensor with the
+* Before early matching, one verification attempt took **3.1 s**, measured on the sensor with the
   16 frame burst: 2.8 s of burst (about 188 ms per frame, of which about
   105 ms is the USB transfer of the 25600 byte frames over a full-speed
   link) and 0.3 s of matching.  With the 32 frame burst it took 6.5 s

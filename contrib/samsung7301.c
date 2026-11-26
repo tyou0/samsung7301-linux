@@ -107,6 +107,8 @@ static const FpIdEntry id_table[] = {
  * over the four the matcher can use.
  */
 #define CAPTURE_FRAMES 16
+/* A verification is checked every this many frames of the burst; a match
+ * ends the burst early, anything else continues it to CAPTURE_FRAMES. */
 #define VERIFY_EARLY_FRAMES 4
 
 /* The delay between two frames of the burst. */
@@ -446,6 +448,7 @@ struct _FpiDeviceSamsung7301
 
   /* The frames of the burst that is being captured. */
   GPtrArray *frames;
+  gint64     next_trigger_at; /* monotonic deadline after an intermediate frame */
 
   /* The reference frames: the frames that were enrolled so far during an
    * enrolment, the stored print during a verification. */
@@ -1777,9 +1780,12 @@ s7301_burst_next (FpiDeviceSamsung7301 *self)
     }
 
   if (self->verifying &&
-      (self->frames->len == VERIFY_EARLY_FRAMES ||
+      (self->frames->len % VERIFY_EARLY_FRAMES == 0 ||
        self->frames->len == CAPTURE_FRAMES))
     {
+      if (self->frames->len < CAPTURE_FRAMES)
+        self->next_trigger_at = g_get_monotonic_time () +
+                                BURST_DELAY * G_TIME_SPAN_MILLISECOND;
       fpi_ssm_jump_to_state (self->ssm, C_HELPER);
       return;
     }
@@ -2101,7 +2107,7 @@ s7301_result (FpiDeviceSamsung7301 *self)
       return;
     }
 
-  if (self->frames->len == VERIFY_EARLY_FRAMES &&
+  if (self->frames->len < CAPTURE_FRAMES &&
       result->quality_max >= AFIS_THRESHOLD &&
       result->best_cross >= AFIS_THRESHOLD)
     {
@@ -2112,7 +2118,16 @@ s7301_result (FpiDeviceSamsung7301 *self)
 
   if (self->frames->len < CAPTURE_FRAMES)
     {
-      fpi_ssm_jump_to_state_delayed (self->ssm, C_TRIGGER, BURST_DELAY);
+      const gint64 remaining = self->next_trigger_at - g_get_monotonic_time ();
+
+      /* Matching already counts toward the minimum inter-frame delay.
+       * Round up so a fractional millisecond never shortens it. */
+      if (remaining > 0)
+        fpi_ssm_jump_to_state_delayed (self->ssm, C_TRIGGER,
+                                       (remaining + G_TIME_SPAN_MILLISECOND - 1) /
+                                       G_TIME_SPAN_MILLISECOND);
+      else
+        fpi_ssm_jump_to_state (self->ssm, C_TRIGGER);
       return;
     }
 

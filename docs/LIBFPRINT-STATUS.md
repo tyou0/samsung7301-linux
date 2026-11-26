@@ -28,7 +28,7 @@ the helper.
 | | |
 |---|---|
 | frame | native 160x160, 8 bit grey, no header, no resizing |
-| burst | verification checks after 4 frames and falls back to 16; enrollment uses 16; 80 ms apart |
+| burst | verification checks after every 4 frames up to 16; enrollment uses 16; 80 ms apart |
 | settle | 150 ms of contact before the first exposure |
 | finger | decided by the capacitive zones, 7 of 12 covered |
 | USB interface | claimed explicitly, released on close and on a failed open |
@@ -187,6 +187,39 @@ code and register settings. The cause of those missed touches remains
 unknown. The working library was temporarily restored for a comparison;
 the optimized library with the hash above was then reinstalled and fprintd
 restarted successfully.
+
+## Faster matching (2026-11-26)
+
+The journal of a weak press showed where the time went: each frame costs
+about 185 ms (104 ms of USB transfer, 80 ms of spacing), and each run of the
+matcher helper took 214 ms.  A press that failed the 4 frame check then had
+to capture all 16 frames before it was checked again.
+
+Two changes, neither of which touches the thresholds, the frame spacing, the
+settle time or the stored prints:
+
+* The helper builds one `FingerprintMatcher` per probe and reuses it for the
+  self match and for every reference, instead of building a new matcher for
+  every probe/reference pair, and extracts the templates in parallel.  On
+  the retained legacy frames the result line is byte for byte the same as
+  before and the helper is 1.5 to 4.2 times faster; real frames were not
+  available to measure without root.
+* Verification is checked after every 4 frames (4, 8, 12, 16) instead of
+  only after 4 and 16.  The intermediate checks use the same threshold of
+  40 for both the capture quality and the identity score, and the score of
+  a subset of the frames can never exceed the score of all 16, so nothing
+  is accepted that the final check would not have accepted; a genuine press
+  that becomes good enough by frame 8 just finishes about 1.5 s earlier.
+
+The hardware-free harness (`python3 tools/test-samsung7301-latency.py`)
+covers the new transitions.  The rebuilt library and helper were **not
+installed and not tested on the sensor** in this change.
+
+Intermediate verification checks now count toward the minimum 80 ms delay
+before triggering the next frame. After an unsuccessful check at frame 4,
+8 or 12, the driver waits only for the remaining time, if any. This removes
+up to 80 ms of redundant wait per checkpoint (up to 240 ms per attempt).
+Enrollment and the match thresholds are unchanged.
 
 ## Still open
 

@@ -109,46 +109,50 @@ internal static class Program
         var probeTemplates = Extract(probes);
         var referenceTemplates = Extract(references);
 
-        /* Capture strength: the exact self match of the probe. */
+        /* One matcher per probe.  Building the matcher is the expensive part
+         * of a SourceAFIS match, so it is built once and reused for the self
+         * match and for every reference; the probes are independent, so they
+         * run in parallel.  Every slot is written by exactly one probe. */
         var self = new double[probeCount];
         var eligible = new bool[probeCount];
-        double qualityMax = 0.0;
+        var cross = new double[probeCount];
 
-        for (uint p = 0; p < probeCount; p++)
+        Parallel.For(0, (int)probeCount, p =>
         {
             if (probeTemplates[p] is null)
-                continue;
+                return;
 
-            self[p] = Match(probeTemplates[p]!, probeTemplates[p]!);
-            if (self[p] > qualityMax)
-                qualityMax = self[p];
-            if (self[p] >= MatchThreshold)
-                eligible[p] = true;
-        }
+            var matcher = new FingerprintMatcher(probeTemplates[p]!);
 
-        /* Identity: the exact score of an eligible probe against the
-         * references. */
-        var cross = new double[probeCount];
-        double bestCross = 0.0;
+            /* Capture strength: the exact self match of the probe. */
+            self[p] = matcher.Match(probeTemplates[p]!);
+            if (self[p] < MatchThreshold)
+                return;
+            eligible[p] = true;
 
-        for (uint p = 0; p < probeCount; p++)
-        {
-            if (!eligible[p])
-                continue;
-
+            /* Identity: the exact score of an eligible probe against the
+             * references. */
             double best = 0.0;
             for (uint r = 0; r < referenceCount; r++)
             {
                 if (referenceTemplates[r] is null)
                     continue;
 
-                double score = Match(probeTemplates[p]!, referenceTemplates[r]!);
+                double score = matcher.Match(referenceTemplates[r]!);
                 if (score > best)
                     best = score;
             }
             cross[p] = best;
-            if (best > bestCross)
-                bestCross = best;
+        });
+
+        double qualityMax = 0.0;
+        double bestCross = 0.0;
+        for (uint p = 0; p < probeCount; p++)
+        {
+            if (self[p] > qualityMax)
+                qualityMax = self[p];
+            if (cross[p] > bestCross)
+                bestCross = cross[p];
         }
 
         /* Selection: the strongest probes, at most four of them, each of them
@@ -257,21 +261,20 @@ internal static class Program
     {
         var templates = new FingerprintTemplate?[frames.Length];
 
-        for (int i = 0; i < frames.Length; i++)
+        /* The frames are independent, so they are extracted in parallel;
+         * every slot is written by exactly one frame. */
+        Parallel.For(0, frames.Length, i =>
         {
             if (StdDev(frames[i]) < BlankStdDevThreshold)
-                continue;
+                return;
 
             var image = new FingerprintImage(Width, Height, Prepare(frames[i]),
                                              new FingerprintImageOptions { Dpi = 500 });
             templates[i] = new FingerprintTemplate(image);
-        }
+        });
 
         return templates;
     }
-
-    private static double Match(FingerprintTemplate a, FingerprintTemplate b) =>
-        new FingerprintMatcher(a).Match(b);
 
     /* The validated image preparation: a per frame min/max linear contrast
      * stretch with integer rounding, then the inversion. */

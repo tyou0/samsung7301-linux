@@ -1,3 +1,14 @@
+2026-11-26 - Faster matching
+- The matcher helper builds one FingerprintMatcher per probe and reuses it
+  for the self match and every reference, and extracts the templates in
+  parallel.  Same result line, 1.5 to 4.2 times faster on the retained
+  legacy frames.
+- Verification is checked after every 4 frames (4, 8, 12, 16) instead of
+  only after 4 and 16.  Thresholds, frame spacing, settle time and the
+  stored prints are unchanged.  Not yet installed or tested on the sensor.
+- Count intermediate matching time toward the minimum 80 ms frame interval,
+  avoiding up to 80 ms of redundant wait after each unsuccessful check.
+
 2026-10-22 - Enrolment and verification work
 - The enrolment completed all five stages through fprintd with the installed
   stack, and a genuine verification reported verify-match.  The print is

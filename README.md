@@ -25,7 +25,7 @@ from scratch by reverse engineering Samsung's own Windows driver.
 | | |
 |---|---|
 | `fprintd` device discovery | works |
-| Driver | plain `FpDevice`, native 160x160 frames; verification checks after 4 frames and falls back to 16; enrollment uses 16 frames; 80 ms spacing, 150 ms settle |
+| Driver | plain `FpDevice`, native 160x160 frames; verification checks after every 4 frames up to 16; enrollment uses 16 frames; 80 ms spacing, 150 ms settle |
 | Matcher | SourceAFIS 3.14 in a separate native helper, threshold 40, never lowered |
 | Stored print | protected `FPI_PRINT_RAW` print, version `samsung7301-sourceafis-v1` |
 | Enrolment | **completed** — all 5 stages passed, the print is stored in `fprintd`'s own storage |
@@ -56,9 +56,11 @@ not taken from the environment, from a print or from any other source.
 The driver no longer uses libfprint's image device interface.  It is a plain
 `FpDevice` that captures the native 160x160 frames itself, 80 ms apart after
 the finger has rested on the sensor for 150 ms, and hands the frames to the
-helper over a pipe. Verification checks after 4 frames and, if necessary,
-continues the same burst to 16 frames. It restores the detection profile
-and finishes without waiting for finger removal. Enrollment still uses
+helper over a pipe. Verification checks after every 4 frames and, if
+necessary, continues the same burst to 16 frames. Time spent on an
+intermediate check counts toward the minimum 80 ms before the next frame.
+Verification restores the detection profile and finishes without waiting
+for finger removal. Enrollment still uses
 16 frames and requires finger removal between stages. The helper prints one result
 line, the driver validates that line and the exit status of the helper, and
 the run is bounded by 15 seconds.

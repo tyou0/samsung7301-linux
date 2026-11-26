@@ -57,6 +57,7 @@ typedef unsigned int guint;
 typedef int gboolean;
 typedef uint8_t guint8;
 typedef size_t gsize;
+typedef int64_t gint64;
 typedef struct { guint len; } GPtrArray;
 typedef struct { int action_cancelled; guint present_reports; } FpDevice;
 typedef struct { int code; } GError;
@@ -74,6 +75,7 @@ typedef struct {
   FpDevice parent;
   FpiSsm *ssm;
   GPtrArray *frames;
+  gint64 next_trigger_at;
   S7301HelperResult helper_result;
   gboolean enrolling, verifying, cancelled, finger_present;
   FpiMatchResult verify_result;
@@ -102,7 +104,12 @@ enum { FP_DEVICE_RETRY_GENERAL = 1 };
 #define G_IO_ERROR_CANCELLED 2
 #define FP_DEVICE_ERROR 3
 #define FP_DEVICE_ERROR_PROTO 4
+#define G_TIME_SPAN_MILLISECOND 1000
 #define fp_dbg(...) ((void) 0)
+
+static gint64 monotonic_time;
+static gint64 g_get_monotonic_time(void)
+{ return monotonic_time; }
 
 static GError *g_error_new_literal(int domain, int code, const char *message)
 { (void) domain; (void) message; GError *e = calloc(1, sizeof(*e)); e->code = code; return e; }
@@ -140,6 +147,7 @@ static void s7301_enroll_retry(FpiDeviceSamsung7301 *self)
 tests = r"""
 static void setup(FpiDeviceSamsung7301 *d, FpiSsm *ssm, GPtrArray *frames, guint n)
 {
+  monotonic_time = 1000000;
   *d = (FpiDeviceSamsung7301) { 0 };
   *ssm = (FpiSsm) { .cur_state = C_READ };
   *frames = (GPtrArray) { .len = n };
@@ -172,17 +180,42 @@ static void test_initial_success_and_fallback(void)
   assert(d.verify_result == FPI_MATCH_SUCCESS && !d.verify_error);
   assert(ssm.action == ACT_JUMP && ssm.target == C_RESTORE_DETECT);
 
+  setup(&d, &ssm, &frames, 8); d.verifying = TRUE;
+  d.helper_result.quality_max = 40; d.helper_result.best_cross = 40;
+  s7301_result(&d);
+  assert(d.verify_result == FPI_MATCH_SUCCESS && !d.verify_error);
+  assert(ssm.action == ACT_JUMP && ssm.target == C_RESTORE_DETECT);
+
   for (int weak = 0; weak < 2; weak++) {
     setup(&d, &ssm, &frames, 4); d.verifying = TRUE;
     d.helper_result.quality_max = weak ? 50 : 39;
     d.helper_result.best_cross = weak ? 39 : 90;
+    s7301_burst_next(&d);
+    assert(ssm.action == ACT_JUMP && ssm.target == C_HELPER);
+    monotonic_time += 25500; /* 25.5 ms matching leaves 54.5 ms to round up. */
     s7301_result(&d);
-    assert(ssm.action == ACT_DELAYED && ssm.target == C_TRIGGER && ssm.delay == BURST_DELAY);
+    assert(ssm.action == ACT_DELAYED && ssm.target == C_TRIGGER && ssm.delay == 55);
     assert(frames.len == 4 && d.verify_result == FPI_MATCH_FAIL && !d.verify_error);
     for (frames.len = 5; frames.len < 16; frames.len++) {
       ssm.action = ACT_NONE;
+      monotonic_time += 185000;
       s7301_burst_next(&d);
-      assert(ssm.action == ACT_DELAYED && ssm.target == C_TRIGGER);
+      if (frames.len % VERIFY_EARLY_FRAMES == 0) {
+        /* An intermediate check that stays weak continues the burst. */
+        assert(ssm.action == ACT_JUMP && ssm.target == C_HELPER);
+        ssm.action = ACT_NONE;
+        /* A later check gets a fresh interval, not the deadline from frame 4. */
+        monotonic_time += frames.len == 8 ? 12500 : (weak ? 140000 : 80000);
+        s7301_result(&d);
+        assert(ssm.target == C_TRIGGER);
+        if (frames.len == 8)
+          assert(ssm.action == ACT_DELAYED && ssm.delay == 68);
+        else
+          assert(ssm.action == ACT_JUMP);
+        assert(d.verify_result == FPI_MATCH_FAIL && !d.verify_error);
+      } else {
+        assert(ssm.action == ACT_DELAYED && ssm.target == C_TRIGGER);
+      }
     }
     ssm.action = ACT_NONE;
     s7301_burst_next(&d);
